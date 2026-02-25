@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Download, Upload, Moon, Sun, Settings as SettingsIcon, MessageCircle, Repeat2, Heart, Bookmark } from "lucide-react";
-import { toPng } from "html-to-image";
+import html2canvas from "html2canvas";
 import { cn } from "../../lib/utils";
 import { useAppStore } from "../../store/useAppStore";
 import { useAuthStore } from "../../store/useAuthStore";
@@ -68,20 +68,16 @@ export function TwitterGenerator() {
         try {
             setIsDownloading(true);
 
-            // iOS/Safari fix: call toPng a few times before taking the actual shot
-            // as it sometimes fails to load images/SVG on the first pass
-            await toPng(previewRef.current, {
-                pixelRatio: 1,
-                cacheBust: true,
-                skipFonts: true
+            // Use html2canvas instead of html-to-image for better iOS Safari compatibility
+            // especially with external/base64 avatars
+            const canvas = await html2canvas(previewRef.current, {
+                scale: 4, // High resolution
+                useCORS: true,
+                allowTaint: true,
+                backgroundColor: null, // Transparent if needed
+                logging: false
             });
-            await new Promise(r => setTimeout(r, 400)); // Increased wait for image decoding
-
-            const dataUrl = await toPng(previewRef.current, {
-                pixelRatio: 4, // Ultra high resolution
-                backgroundColor: undefined, // Transparent background if not set
-                cacheBust: true
-            });
+            const dataUrl = canvas.toDataURL("image/png");
 
             // Native Share API for Mobile Devices (Most reliable for iOS)
             if (navigator.share && /iPad|iPhone|iPod|Android/.test(navigator.userAgent)) {
