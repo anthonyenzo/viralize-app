@@ -72,19 +72,17 @@ export function TwitterGenerator() {
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
             const exportScale = 4; // User requested 4x resolution
 
-            // iOS/Safari fix: preliminary render to cache DOM nodes/images
-            await toPng(previewRef.current, {
-                pixelRatio: 1,
-                cacheBust: true,
-                skipFonts: true
-            }).catch(() => { }); // ignore warmup errors
-            await new Promise(r => setTimeout(r, 500));
+            // iOS/Opera/Safari fix: aggressive preliminary render to cache DOM nodes/images
+            // We run this multiple times to force the browser engine to paint all base64 assets
+            await toPng(previewRef.current, { pixelRatio: 1, skipFonts: true }).catch(() => { });
+            await toPng(previewRef.current, { pixelRatio: 1, skipFonts: true }).catch(() => { });
+            await toPng(previewRef.current, { pixelRatio: 1 }).catch(() => { });
+            await new Promise(r => setTimeout(r, 300));
 
             // If mobile Native Share is supported, toBlob is much safer/faster than a giant base64 dataUrl
             if (navigator.share && isMobile) {
                 const blob = await toBlob(previewRef.current, {
                     pixelRatio: exportScale,
-                    cacheBust: true,
                     backgroundColor: undefined
                 });
 
@@ -105,7 +103,6 @@ export function TwitterGenerator() {
                 // Desktop or browsers without Share API fallback
                 const dataUrl = await toPng(previewRef.current, {
                     pixelRatio: exportScale,
-                    cacheBust: true,
                     backgroundColor: undefined
                 });
 
