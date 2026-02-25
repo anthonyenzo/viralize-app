@@ -59,6 +59,7 @@ export function ReelsCreator() {
     const [isDragging, setIsDragging] = useState(false);
     const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
     const [touchDistance, setTouchDistance] = useState<number | null>(null);
+    const [exportedBlob, setExportedBlob] = useState<Blob | null>(null);
 
     // Refs
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -67,7 +68,6 @@ export function ReelsCreator() {
     const isRenderingRef = useRef(false); // Ref for sync state checking inside loops
     const [isRendering, setIsRendering] = useState(false);
     const audioContextRef = useRef<AudioContext | null>(null);
-    const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
 
     // Load Data
     useEffect(() => {
@@ -449,24 +449,6 @@ export function ReelsCreator() {
                 console.warn("Audio extraction failed or video is silent.", e);
             }
 
-            // Node Graph Construction
-            const dest = audioCtx.createMediaStreamDestination();
-
-            // Connect Video Element -> Destination
-            if (!sourceNodeRef.current) {
-                try {
-                    sourceNodeRef.current = audioCtx.createMediaElementSource(video);
-                    // Note: We don't connect to speakers here to avoid feedback during render
-                } catch (e) {
-                    console.warn("Source node creation failed/existed", e);
-                }
-            }
-            const source = sourceNodeRef.current;
-            if (source) {
-                try { source.disconnect(); } catch { } // Disconnect everything
-                source.connect(dest);
-            }
-
             // --- Muxer & Encoder Setup ---
             console.log("Render: Importing Muxer...");
             const { Muxer, ArrayBufferTarget } = await import('mp4-muxer');
@@ -786,34 +768,7 @@ export function ReelsCreator() {
 
                     const buffer = (muxer.target as any).buffer;
                     const blob = new Blob([buffer], { type: 'video/mp4' });
-                    const file = new File([blob], `viralize-reel-${Date.now()}.mp4`, { type: 'video/mp4' });
-
-                    // Direct Save / Web Share API for iOS/Android
-                    try {
-                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                            await navigator.share({
-                                files: [file],
-                                title: 'Viralize Reel',
-                                text: 'Confira este reel gerado no Viralize AI'
-                            });
-                        } else {
-                            throw new Error("Web Share failed to initialize");
-                        }
-                    } catch (shareError) {
-                        console.log("Fallback to legacy download:", shareError);
-                        // Fallback: Forced download via hidden <a> tag (Desktop/Older Android)
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.style.display = 'none';
-                        a.href = url;
-                        a.download = file.name;
-                        document.body.appendChild(a);
-                        a.click();
-                        setTimeout(() => {
-                            document.body.removeChild(a);
-                            URL.revokeObjectURL(url);
-                        }, 100);
-                    }
+                    setExportedBlob(blob); // Save to state for manual download trigger
 
                     if (user) {
                         incrementReels(user.id);
@@ -868,6 +823,35 @@ export function ReelsCreator() {
         }
     };
 
+    const handleDownload = async () => {
+        if (!exportedBlob) return;
+        const file = new File([exportedBlob], `viralize-reel-${Date.now()}.mp4`, { type: 'video/mp4' });
+
+        try {
+            if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                await navigator.share({
+                    files: [file],
+                    title: 'Viralize Reel',
+                    text: 'Confira este reel gerado no Viralize AI'
+                });
+            } else {
+                throw new Error("Web Share failed/unsupported");
+            }
+        } catch (shareError) {
+            console.log("Fallback to legacy download:", shareError);
+            const url = URL.createObjectURL(exportedBlob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = file.name;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }, 100);
+        }
+    };
 
     return (
         <div className="flex flex-col-reverse lg:flex-row gap-6 min-h-full">
@@ -1150,7 +1134,7 @@ export function ReelsCreator() {
                                 />
 
                                 {/* Controls Overlay */}
-                                <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 opacity-0 group-hover:opacity-100 transition-opacity z-20">
+                                <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity z-20">
                                     <button
                                         onClick={(e) => {
                                             e.stopPropagation();
@@ -1226,20 +1210,38 @@ export function ReelsCreator() {
                             ))}
                         </div>
 
-                        <button
-                            onClick={renderVideo}
-                            disabled={!selectedHeadline || isRendering || !videoUrl}
-                            className="w-full py-4 bg-gradient-to-r from-sky-400 to-sky-400 hover:from-sky-300 hover:to-sky-300 text-zinc-950 rounded-xl font-bold shadow-lg shadow-sky-400/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            {isRendering ? (
-                                "Processando..."
-                            ) : (
-                                <>
+                        {exportedBlob ? (
+                            <div className="flex flex-col gap-3">
+                                <button
+                                    onClick={handleDownload}
+                                    className="w-full py-4 bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 text-zinc-950 rounded-xl font-bold shadow-lg shadow-emerald-500/20 transition-all flex items-center justify-center gap-2"
+                                >
                                     <Download className="w-5 h-5" />
-                                    Gerar e Baixar Reel
-                                </>
-                            )}
-                        </button>
+                                    Salvar Reel / Compartilhar
+                                </button>
+                                <button
+                                    onClick={() => setExportedBlob(null)}
+                                    className="w-full py-3 bg-zinc-800 text-zinc-300 rounded-xl font-medium transition-all flex items-center justify-center"
+                                >
+                                    Fazer Nova Alteração
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                onClick={renderVideo}
+                                disabled={!selectedHeadline || isRendering || !videoUrl}
+                                className="w-full py-4 bg-gradient-to-r from-sky-400 to-sky-400 hover:from-sky-300 hover:to-sky-300 text-zinc-950 rounded-xl font-bold shadow-lg shadow-sky-400/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {isRendering ? (
+                                    "Renderizando Vídeo..."
+                                ) : (
+                                    <>
+                                        <Play className="w-5 h-5" />
+                                        Gerar Reel
+                                    </>
+                                )}
+                            </button>
+                        )}
                         <p className="text-center text-xs text-zinc-500 mt-2">
                             Exportação em {resolution} • 60fps • 12Mbps • AAC
                         </p>
