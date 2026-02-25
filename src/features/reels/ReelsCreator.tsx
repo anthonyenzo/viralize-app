@@ -490,8 +490,8 @@ export function ReelsCreator() {
             if (audioBuffer) {
                 muxerOptions.audio = {
                     codec: 'aac',
-                    numberOfChannels: audioBuffer.numberOfChannels, // Dynamic channels (mono/stereo)
-                    sampleRate: audioBuffer.sampleRate
+                    numberOfChannels: 2, // Force Stereo for maximum compatibility
+                    sampleRate: 48000 // Force 48000Hz for AAC standard
                 };
             }
 
@@ -523,7 +523,7 @@ export function ReelsCreator() {
             });
 
             const videoConfig: VideoEncoderConfig = {
-                codec: 'avc1.640029', // H.264 High Profile Level 4.1 (CapCut Standard)
+                codec: 'avc1.4D4028', // H.264 Main Profile Level 4.0 (Universal iOS/Android compatibility)
                 width: targetWidth,
                 height: targetHeight,
                 bitrate: 12_000_000, // 12 Mbps (User Requested)
@@ -563,20 +563,34 @@ export function ReelsCreator() {
 
                 audioEncoder.configure({
                     codec: 'mp4a.40.2', // AAC LC
-                    numberOfChannels: audioBuffer.numberOfChannels,
-                    sampleRate: audioBuffer.sampleRate,
-                    bitrate: Math.max(128_000, audioBuffer.numberOfChannels * 64_000), // Scale bitrate by channels
+                    numberOfChannels: 2,
+                    sampleRate: 48000,
+                    bitrate: 128_000, // Standard bitrate
                 });
                 console.log("Render: AudioEncoder configured.");
 
-                // --- 1. Process Audio Offline (Fast & High Quality) ---
+                // --- 1. Process Audio Offline (Max Compatibility) ---
                 const processAudio = async () => {
                     if (!audioEncoder || !audioBuffer) return;
                     console.log("Render: encoding audio track...");
                     try {
-                        const sampleRate = audioBuffer.sampleRate;
-                        const numberOfChannels = audioBuffer.numberOfChannels;
-                        const totalFrames = audioBuffer.length;
+                        const targetSampleRate = 48000;
+                        const targetChannels = 2;
+                        const duration = audioBuffer.duration;
+
+                        // Resample directly via OfflineAudioContext to guarantee 48000Hz Stereo
+                        const offlineCtx = new (window.OfflineAudioContext || (window as any).webkitOfflineAudioContext)(
+                            targetChannels,
+                            Math.ceil(targetSampleRate * duration),
+                            targetSampleRate
+                        );
+                        const source = offlineCtx.createBufferSource();
+                        source.buffer = audioBuffer;
+                        source.connect(offlineCtx.destination);
+                        source.start(0);
+
+                        const resampledBuffer = await offlineCtx.startRendering();
+                        const totalFrames = resampledBuffer.length;
 
                         // 1024 frames is a standard block size that Web Audio API handles well natively
                         const chunkSize = 1024;
@@ -585,10 +599,11 @@ export function ReelsCreator() {
                         while (offset < totalFrames) {
                             const size = Math.min(chunkSize, totalFrames - offset);
 
-                            // For 'f32-planar', data must be structured as [CH0_DATA, CH1_DATA, ...] sequentially in one Float32Array
-                            const planarData = new Float32Array(size * numberOfChannels);
-                            for (let ch = 0; ch < numberOfChannels; ch++) {
-                                const bufferChannelData = audioBuffer.getChannelData(ch);
+                            // For maximum browser compatibility (specifically iOS Safari), we use 'f32-planar'
+                            // BUT we ensure it's strictly 2 channels, 48000Hz after resampling.
+                            const planarData = new Float32Array(size * targetChannels);
+                            for (let ch = 0; ch < targetChannels; ch++) {
+                                const bufferChannelData = resampledBuffer.getChannelData(ch);
                                 for (let i = 0; i < size; i++) {
                                     planarData[ch * size + i] = bufferChannelData[offset + i];
                                 }
@@ -596,10 +611,10 @@ export function ReelsCreator() {
 
                             const audioData = new AudioData({
                                 format: 'f32-planar',
-                                sampleRate: sampleRate,
+                                sampleRate: targetSampleRate,
                                 numberOfFrames: size,
-                                numberOfChannels: numberOfChannels,
-                                timestamp: Math.round(offset * 1_000_000 / sampleRate),
+                                numberOfChannels: targetChannels,
+                                timestamp: Math.round(offset * 1_000_000 / targetSampleRate),
                                 data: planarData
                             });
 
@@ -607,8 +622,8 @@ export function ReelsCreator() {
                             audioData.close();
                             offset += size;
 
-                            // Yield to main thread briefly every 100 chunks to prevent UI lockup during audio extraction
-                            if (offset % (chunkSize * 100) === 0) {
+                            // Yield to main thread briefly every block chunks
+                            if (offset % (chunkSize * 50) === 0) {
                                 await new Promise(r => setTimeout(r, 0));
                             }
                         }
@@ -771,12 +786,35 @@ export function ReelsCreator() {
 
                     const buffer = (muxer.target as any).buffer;
                     const blob = new Blob([buffer], { type: 'video/mp4' });
-                    const url = URL.createObjectURL(blob);
+                    const file = new File([blob], `viralize-reel-${Date.now()}.mp4`, { type: 'video/mp4' });
 
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `viralize-reel-${Date.now()}.mp4`;
-                    a.click();
+                    // Direct Save / Web Share API for iOS/Android
+                    try {
+                        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                            await navigator.share({
+                                files: [file],
+                                title: 'Viralize Reel',
+                                text: 'Confira este reel gerado no Viralize AI'
+                            });
+                        } else {
+                            throw new Error("Web Share failed to initialize");
+                        }
+                    } catch (shareError) {
+                        console.log("Fallback to legacy download:", shareError);
+                        // Fallback: Forced download via hidden <a> tag (Desktop/Older Android)
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = url;
+                        a.download = file.name;
+                        document.body.appendChild(a);
+                        a.click();
+                        setTimeout(() => {
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                        }, 100);
+                    }
+
                     if (user) {
                         incrementReels(user.id);
                     }
