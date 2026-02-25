@@ -1,9 +1,46 @@
 import { useState, useRef, useEffect } from "react";
 import { Download, Upload, Image as ImageIcon, AlignLeft, AlignCenter, AlignRight, Type } from "lucide-react";
-import { toPng } from "html-to-image";
+import { toBlob, toPng } from "html-to-image";
 import { cn } from "../../lib/utils";
 import { useAppStore } from "../../store/useAppStore";
 import { useAuthStore } from "../../store/useAuthStore";
+
+// Helper function to resize Base64 images to prevent crashing mobile browsers when rendering SVG canvases
+const resizeImage = (base64Str: string, maxWidth = 1080, maxHeight = 1920): Promise<string> => {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.src = base64Str;
+        img.onload = () => {
+            const canvas = document.createElement("canvas");
+            let width = img.width;
+            let height = img.height;
+
+            if (width > height) {
+                if (width > maxWidth) {
+                    height = Math.round((height * maxWidth) / width);
+                    width = maxWidth;
+                }
+            } else {
+                if (height > maxHeight) {
+                    width = Math.round((width * maxHeight) / height);
+                    height = maxHeight;
+                }
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+                ctx.drawImage(img, 0, 0, width, height);
+                // Convert to compressed jpeg to reduce Base64 size footprint
+                resolve(canvas.toDataURL("image/jpeg", 0.9));
+            } else {
+                resolve(base64Str);
+            }
+        };
+        img.onerror = () => resolve(base64Str);
+    });
+};
 
 export function QuoteGenerator() {
     const { incrementQuote } = useAppStore();
@@ -26,13 +63,19 @@ export function QuoteGenerator() {
                 const state = JSON.parse(savedState);
                 if (state.text) setText(state.text);
                 if (state.author) setAuthor(state.author);
-                if (state.bgImage !== undefined) setBgImage(state.bgImage);
                 if (state.overlayOpacity !== undefined) setOverlayOpacity(state.overlayOpacity);
                 if (state.highlightColor) setHighlightColor(state.highlightColor);
                 if (state.alignment) setAlignment(state.alignment);
                 if (state.fontSize !== undefined) setFontSize(state.fontSize);
                 if (state.usernameSize !== undefined) setUsernameSize(state.usernameSize);
                 if (state.aspectRatio) setAspectRatio(state.aspectRatio);
+                if (state.bgImage !== undefined && state.bgImage !== null) {
+                    if (state.bgImage.length > 500_000) {
+                        resizeImage(state.bgImage, 1080, 1920).then(resized => setBgImage(resized));
+                    } else {
+                        setBgImage(state.bgImage);
+                    }
+                }
             } catch (e) {
                 console.error("Failed to load quote state", e);
             }
@@ -43,7 +86,15 @@ export function QuoteGenerator() {
         const file = e.target.files?.[0];
         if (file) {
             const reader = new FileReader();
-            reader.onloadend = () => setBgImage(reader.result as string);
+            reader.onloadend = async () => {
+                const result = reader.result as string;
+                if (result.length > 500_000) {
+                    const resized = await resizeImage(result, 1080, 1920);
+                    setBgImage(resized);
+                } else {
+                    setBgImage(result);
+                }
+            };
             reader.readAsDataURL(file);
         }
     };
@@ -53,20 +104,54 @@ export function QuoteGenerator() {
     // ...
 
     const handleDownload = async () => {
-        // ... implementation
         if (!previewRef.current) return;
 
         try {
             setIsDownloading(true);
-            const dataUrl = await toPng(previewRef.current, {
-                pixelRatio: 4, // Ultra high resolution
-                backgroundColor: "#000000",
-            });
 
-            const link = document.createElement("a");
-            link.download = `quote-${Date.now()}.png`;
-            link.href = dataUrl;
-            link.click();
+            // Determine if the device is purely mobile to adjust logic
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            const exportScale = 4; // User requested 4x resolution
+
+            // iOS/Opera/Safari fix: aggressive preliminary render to cache DOM nodes/images
+            await toPng(previewRef.current, { pixelRatio: 1, skipFonts: true }).catch(() => { });
+            await toPng(previewRef.current, { pixelRatio: 1, skipFonts: true }).catch(() => { });
+            await toPng(previewRef.current, { pixelRatio: 1 }).catch(() => { });
+            await new Promise(r => setTimeout(r, 300));
+
+            // If mobile Native Share is supported, toBlob is much safer/faster than a giant base64 dataUrl
+            if (navigator.share && isMobile) {
+                const blob = await toBlob(previewRef.current, {
+                    pixelRatio: exportScale,
+                    backgroundColor: "#000000"
+                });
+
+                if (!blob) throw new Error("Falha ao gerar a imagem no formato Blob.");
+
+                const file = new File([blob], `quote-${Date.now()}.png`, { type: 'image/png' });
+                try {
+                    await navigator.share({
+                        title: 'Frase Gerada via Viralize',
+                        files: [file]
+                    });
+                } catch (shareError: any) {
+                    if (shareError.name !== 'AbortError') {
+                        throw shareError;
+                    }
+                }
+            } else {
+                // Desktop or browsers without Share API fallback
+                const dataUrl = await toPng(previewRef.current, {
+                    pixelRatio: exportScale,
+                    backgroundColor: "#000000"
+                });
+
+                const link = document.createElement("a");
+                link.download = `quote-${Date.now()}.png`;
+                link.href = dataUrl;
+                link.click();
+            }
+
             if (user) {
                 incrementQuote(user.id);
             }
@@ -77,7 +162,7 @@ export function QuoteGenerator() {
             localStorage.setItem("viralize-quote-state", JSON.stringify(currentState));
         } catch (error) {
             console.error("Export failed:", error);
-            alert("Erro ao baixar a quote. Tente novamente.");
+            alert("Ocorreu um erro ao gerar a imagem. Verifique se a foto de fundo não é muito pesada ou tente usar outro navegador.");
         } finally {
             setIsDownloading(false);
         }
