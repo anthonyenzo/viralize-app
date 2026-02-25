@@ -68,9 +68,9 @@ export function TwitterGenerator() {
         try {
             setIsDownloading(true);
 
-            // Determine if the device is purely mobile to adjust pixelRatio and logic
+            // Determine if the device is purely mobile to adjust logic
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-            const exportScale = isMobile ? 3 : 4; // Lower scale on mobile prevents memory crashes
+            const exportScale = 4; // User requested 4x resolution
 
             // iOS/Safari fix: preliminary render to cache DOM nodes/images
             await toPng(previewRef.current, {
@@ -350,14 +350,24 @@ export function TwitterGenerator() {
                             <div className="flex items-start justify-between mb-4 relative">
                                 <div className="flex items-center gap-3">
                                     <div
-                                        className="w-12 h-12 rounded-full overflow-hidden"
+                                        className="w-12 h-12 rounded-full overflow-hidden shrink-0 flex items-center justify-center relative"
                                         style={{ backgroundColor: '#e4e4e7' }}
                                     >
                                         {avatar ? (
-                                            <img src={avatar} alt="Avatar" className="w-full h-full object-cover" />
+                                            // Explicitly size the img for html-to-image reliability
+                                            // crossOrigin helps some browsers process the base64 string
+                                            <img
+                                                src={avatar}
+                                                alt="Avatar"
+                                                crossOrigin="anonymous"
+                                                className="w-12 h-12 object-cover absolute top-0 left-0"
+                                                width="48"
+                                                height="48"
+                                                style={{ display: 'block', maxWidth: 'none' }}
+                                            />
                                         ) : (
                                             <div
-                                                className="w-full h-full"
+                                                className="w-full h-full absolute top-0 left-0"
                                                 style={{ background: 'linear-gradient(to top right, #a855f7, #3b82f6)' }}
                                             />
                                         )}
