@@ -58,6 +58,7 @@ export function ReelsCreator() {
     const [videoPosition, setVideoPosition] = useState({ x: 0, y: 0, scale: 1 });
     const [isDragging, setIsDragging] = useState(false);
     const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+    const [touchDistance, setTouchDistance] = useState<number | null>(null);
 
     // Refs
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -437,6 +438,17 @@ export function ReelsCreator() {
             const audioCtx = audioContextRef.current;
             if (audioCtx.state === 'suspended') await audioCtx.resume();
 
+            console.log("Render: extracting audio track...");
+            let audioBuffer: AudioBuffer | null = null;
+            try {
+                const response = await fetch(videoUrl!);
+                const arrayBuffer = await response.arrayBuffer();
+                audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                console.log("Render: Audio decoded", { channels: audioBuffer.numberOfChannels, rate: audioBuffer.sampleRate });
+            } catch (e) {
+                console.warn("Audio extraction failed or video is silent.", e);
+            }
+
             // Node Graph Construction
             const dest = audioCtx.createMediaStreamDestination();
 
@@ -462,7 +474,7 @@ export function ReelsCreator() {
             // Fixed Frame Rate: 60fps (CapCut Standard)
             const FPS = 60;
 
-            const muxer = new Muxer({
+            const muxerOptions: any = {
                 target: new ArrayBufferTarget(),
                 video: {
                     codec: 'avc', // H.264
@@ -470,14 +482,20 @@ export function ReelsCreator() {
                     height: targetHeight,
                     frameRate: FPS
                 },
-                audio: {
-                    codec: 'aac',
-                    numberOfChannels: 2,
-                    sampleRate: audioCtx.sampleRate // Match context rate (usually 44100 or 48000)
-                },
                 fastStart: 'in-memory', // Critical for WhatsApp
                 firstTimestampBehavior: 'offset'
-            });
+            };
+
+            // Only configure muxer audio if we successfully decoded an audio buffer
+            if (audioBuffer) {
+                muxerOptions.audio = {
+                    codec: 'aac',
+                    numberOfChannels: audioBuffer.numberOfChannels, // Dynamic channels (mono/stereo)
+                    sampleRate: audioBuffer.sampleRate
+                };
+            }
+
+            const muxer = new Muxer(muxerOptions);
             console.log("Render: Muxer initialized.");
 
             let encodedFramesCount = 0;
@@ -527,88 +545,82 @@ export function ReelsCreator() {
             videoEncoder.configure(videoConfig);
             console.log("Render: VideoEncoder configured.");
 
-            const audioEncoder = new AudioEncoder({
-                output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
-                error: (e) => {
-                    const msg = e.message || String(e);
-                    if (msg.includes('Flushing error')) {
-                        console.warn("AudioEncoder flushing error (ignored):", e);
-                        return;
+            let audioEncoder: AudioEncoder | null = null;
+
+            if (audioBuffer) {
+                audioEncoder = new AudioEncoder({
+                    output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+                    error: (e) => {
+                        const msg = e.message || String(e);
+                        if (msg.includes('Flushing error')) {
+                            console.warn("AudioEncoder flushing error (ignored):", e);
+                            return;
+                        }
+                        console.error("AudioEncoder error:", e);
+                        alert(`Erro no codificador de áudio: ${msg}`);
                     }
-                    console.error("AudioEncoder error:", e);
-                    alert(`Erro no codificador de áudio: ${msg}`);
-                }
-            });
+                });
 
-            audioEncoder.configure({
-                codec: 'mp4a.40.2', // AAC LC
-                numberOfChannels: 2,
-                sampleRate: audioCtx.sampleRate,
-                bitrate: 128_000,
-            });
-            console.log("Render: AudioEncoder configured.");
+                audioEncoder.configure({
+                    codec: 'mp4a.40.2', // AAC LC
+                    numberOfChannels: audioBuffer.numberOfChannels,
+                    sampleRate: audioBuffer.sampleRate,
+                    bitrate: Math.max(128_000, audioBuffer.numberOfChannels * 64_000), // Scale bitrate by channels
+                });
+                console.log("Render: AudioEncoder configured.");
 
-            // --- 1. Process Audio Offline (Fast & High Quality) ---
-            const processAudio = async () => {
-                console.log("Render: extracting audio track...");
-                try {
-                    const response = await fetch(videoUrl!);
-                    const arrayBuffer = await response.arrayBuffer();
-                    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                // --- 1. Process Audio Offline (Fast & High Quality) ---
+                const processAudio = async () => {
+                    if (!audioEncoder || !audioBuffer) return;
+                    console.log("Render: encoding audio track...");
+                    try {
+                        const sampleRate = audioBuffer.sampleRate;
+                        const numberOfChannels = audioBuffer.numberOfChannels;
+                        const totalFrames = audioBuffer.length;
 
-                    // We need to feed the AudioEncoder in chunks.
-                    // Instead of manually calculating interleaved arrays which fails on some browsers,
-                    // we'll create an OfflineAudioContext to render the buffer perfectly into PCM,
-                    // but since we ALREADY have the decoded audioBuffer, we can just slice it into AudioData directly.
-                    // Crucial Fix: Format MUST match what AudioData expects. The safest format across browsers is 'f32-planar'.
+                        // 1024 frames is a standard block size that Web Audio API handles well natively
+                        const chunkSize = 1024;
+                        let offset = 0;
 
-                    const sampleRate = audioBuffer.sampleRate;
-                    const numberOfChannels = audioBuffer.numberOfChannels;
-                    const totalFrames = audioBuffer.length;
+                        while (offset < totalFrames) {
+                            const size = Math.min(chunkSize, totalFrames - offset);
 
-                    // 1024 frames is a standard block size that Web Audio API handles well natively
-                    const chunkSize = 1024;
-                    let offset = 0;
+                            // For 'f32-planar', data must be structured as [CH0_DATA, CH1_DATA, ...] sequentially in one Float32Array
+                            const planarData = new Float32Array(size * numberOfChannels);
+                            for (let ch = 0; ch < numberOfChannels; ch++) {
+                                const bufferChannelData = audioBuffer.getChannelData(ch);
+                                for (let i = 0; i < size; i++) {
+                                    planarData[ch * size + i] = bufferChannelData[offset + i];
+                                }
+                            }
 
-                    while (offset < totalFrames) {
-                        const size = Math.min(chunkSize, totalFrames - offset);
+                            const audioData = new AudioData({
+                                format: 'f32-planar',
+                                sampleRate: sampleRate,
+                                numberOfFrames: size,
+                                numberOfChannels: numberOfChannels,
+                                timestamp: Math.round(offset * 1_000_000 / sampleRate),
+                                data: planarData
+                            });
 
-                        // For 'f32-planar', data must be structured as [CH0_DATA, CH1_DATA, ...] sequentially in one Float32Array
-                        const planarData = new Float32Array(size * numberOfChannels);
-                        for (let ch = 0; ch < numberOfChannels; ch++) {
-                            const bufferChannelData = audioBuffer.getChannelData(ch);
-                            for (let i = 0; i < size; i++) {
-                                planarData[ch * size + i] = bufferChannelData[offset + i];
+                            audioEncoder.encode(audioData);
+                            audioData.close();
+                            offset += size;
+
+                            // Yield to main thread briefly every 100 chunks to prevent UI lockup during audio extraction
+                            if (offset % (chunkSize * 100) === 0) {
+                                await new Promise(r => setTimeout(r, 0));
                             }
                         }
 
-                        const audioData = new AudioData({
-                            format: 'f32-planar',
-                            sampleRate: sampleRate,
-                            numberOfFrames: size,
-                            numberOfChannels: numberOfChannels,
-                            timestamp: Math.round(offset * 1_000_000 / sampleRate),
-                            data: planarData
-                        });
-
-                        audioEncoder.encode(audioData);
-                        audioData.close();
-                        offset += size;
-
-                        // Yield to main thread briefly every 100 chunks to prevent UI lockup during audio extraction
-                        if (offset % (chunkSize * 100) === 0) {
-                            await new Promise(r => setTimeout(r, 0));
-                        }
+                        console.log("Render: Audio track encoded successfully.");
+                    } catch (e) {
+                        console.error("Audio encoding failed:", e);
                     }
+                };
 
-                    console.log("Render: Audio track encoded successfully.");
-                } catch (e) {
-                    console.error("Audio extraction failed:", e);
-                    // We don't throw here to allow video-only export fallback
-                }
-            };
-
-            await processAudio();
+                await processAudio();
+            }
 
             // --- Prep Playback (Visual Only) ---
             video.currentTime = 0;
@@ -679,14 +691,14 @@ export function ReelsCreator() {
 
                 // Flow Control: Prevent Encoder Saturation (Video + Audio)
                 const vQueue = (videoEncoder as any).encodeQueueSize;
-                const aQueue = (audioEncoder as any).encodeQueueSize;
+                const aQueue = audioEncoder ? (audioEncoder as any).encodeQueueSize : 0;
 
                 if (vQueue > 10 || aQueue > 10) {
                     // Only pause if actually moving
                     if (!video.paused) video.pause();
 
                     // Wait for queues to drain
-                    while (isRenderingRef.current && ((videoEncoder as any).encodeQueueSize > 2 || (audioEncoder as any).encodeQueueSize > 2)) {
+                    while (isRenderingRef.current && ((videoEncoder as any).encodeQueueSize > 2 || (audioEncoder ? (audioEncoder as any).encodeQueueSize : 0) > 2)) {
                         await new Promise(r => setTimeout(r, 10));
                     }
                     if (isRenderingRef.current && video.paused) await video.play();
@@ -736,7 +748,7 @@ export function ReelsCreator() {
                     }
 
                     try {
-                        if (audioEncoder.state === 'configured') await audioEncoder.flush();
+                        if (audioEncoder && (audioEncoder as any).state === 'configured') await audioEncoder.flush();
                     } catch (e) {
                         console.warn("Audio flush error (ignoring):", e);
                         // Non-fatal, proceed to save video (silent)
@@ -757,7 +769,7 @@ export function ReelsCreator() {
                         throw e;
                     }
 
-                    const { buffer } = muxer.target;
+                    const buffer = (muxer.target as any).buffer;
                     const blob = new Blob([buffer], { type: 'video/mp4' });
                     const url = URL.createObjectURL(blob);
 
@@ -777,12 +789,7 @@ export function ReelsCreator() {
                     isRenderingRef.current = false;
                     setIsRendering(false);
 
-                    // Cleanup / Restore Audio
-                    if (source) {
-                        try { source.disconnect(); } catch { }
-                        try { source.connect(audioCtx.destination); } catch { }
-                    }
-
+                    // Cleanup
                     video.currentTime = 0;
                     video.playbackRate = 1.0;
                     video.loop = true;
@@ -1057,13 +1064,33 @@ export function ReelsCreator() {
                                 }}
                                 onMouseUp={() => setIsDragging(false)}
                                 onMouseLeave={() => setIsDragging(false)}
+                                onWheel={(e) => {
+                                    // Desktop scroll-to-zoom
+                                    e.preventDefault();
+                                    setVideoPosition(prev => {
+                                        const zoomAmount = e.deltaY * -0.005;
+                                        return { ...prev, scale: Math.max(0.1, Math.min(prev.scale + zoomAmount, 10)) };
+                                    });
+                                }}
                                 onTouchStart={(e) => {
-                                    const touch = e.touches[0];
-                                    setIsDragging(true);
-                                    setDragStart({ x: touch.clientX - videoPosition.x, y: touch.clientY - videoPosition.y });
+                                    if (e.touches.length === 2) {
+                                        const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                                        setTouchDistance(dist);
+                                    } else {
+                                        const touch = e.touches[0];
+                                        setIsDragging(true);
+                                        setDragStart({ x: touch.clientX - videoPosition.x, y: touch.clientY - videoPosition.y });
+                                    }
                                 }}
                                 onTouchMove={(e) => {
-                                    if (isDragging) {
+                                    if (e.touches.length === 2 && touchDistance !== null) {
+                                        const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                                        setVideoPosition(prev => {
+                                            const scaleChange = (dist - touchDistance) * 0.01;
+                                            return { ...prev, scale: Math.max(0.1, Math.min(prev.scale + scaleChange, 10)) };
+                                        });
+                                        setTouchDistance(dist);
+                                    } else if (isDragging) {
                                         const touch = e.touches[0];
                                         setVideoPosition(prev => ({
                                             ...prev,
@@ -1072,7 +1099,10 @@ export function ReelsCreator() {
                                         }));
                                     }
                                 }}
-                                onTouchEnd={() => setIsDragging(false)}
+                                onTouchEnd={() => {
+                                    setIsDragging(false);
+                                    setTouchDistance(null);
+                                }}
                             >
                                 <canvas
                                     ref={previewCanvasRef}
@@ -1118,10 +1148,6 @@ export function ReelsCreator() {
                                                 />
                                             </div>
                                         </div>
-
-                                        <p className="text-[10px] text-zinc-500 max-w-[200px]">
-                                            Dica: Você pode redimensionar e arrastar o vídeo com os dedos.
-                                        </p>
                                     </div>
                                 )}
                             </div>
@@ -1132,6 +1158,15 @@ export function ReelsCreator() {
                             </div>
                         )
                     }
+
+                    {/* Resize Hint - Only show when editing, not rendering */}
+                    {videoUrl && !isRendering && (
+                        <div className="mt-4 px-4 text-center max-w-[320px]">
+                            <p className="text-xs text-zinc-400 bg-zinc-900/50 p-2 rounded-lg border border-zinc-800/50">
+                                💡 <span className="text-sky-400 font-medium">Dica:</span> Arraste o vídeo com o dedo para reposicionar ou use <span className="text-zinc-300">dois dedos para dar zoom</span> (movimento de pinça).
+                            </p>
+                        </div>
+                    )}
 
                     <div className="mt-6 w-full max-w-[400px]">
                         {/* Resolution Selector */}
