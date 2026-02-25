@@ -78,47 +78,29 @@ export function TwitterGenerator() {
                 backgroundColor: undefined, // Transparent background if not set
             });
 
-            // Mobile-safe download handling
-            try {
-                // Determine if device is purely iOS (iPhone/iPad/iPod)
-                const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-
-                if (isIOS) {
-                    // Method 1: On iOS, forcing a new window with base64 can fail or be blocked.
-                    // The most reliable way is often to convert dataURl to Blob, create object URL, and trigger download.
+            // Native Share API for Mobile Devices (Most reliable for iOS)
+            if (navigator.share && /iPad|iPhone|iPod|Android/.test(navigator.userAgent)) {
+                try {
                     const response = await fetch(dataUrl);
                     const blob = await response.blob();
-                    const objectUrl = window.URL.createObjectURL(blob);
+                    const file = new File([blob], `tweet-${Date.now()}.png`, { type: 'image/png' });
 
-                    const link = document.createElement("a");
-                    link.style.display = "none";
-                    link.href = objectUrl;
-                    link.download = `tweet-${Date.now()}.png`;
-                    document.body.appendChild(link);
-                    link.click();
-
-                    // Cleanup
-                    setTimeout(() => {
-                        window.URL.revokeObjectURL(objectUrl);
-                        document.body.removeChild(link);
-                    }, 1000);
-                } else {
-                    // Method 2: Standard download for Android / Desktop
-                    const link = document.createElement("a");
-                    link.download = `tweet-${Date.now()}.png`;
-                    link.href = dataUrl;
-                    link.click();
+                    await navigator.share({
+                        title: 'Post Gerado via Viralize',
+                        files: [file]
+                    });
+                } catch (shareError: any) {
+                    // AbortError is expected if user cancelled the share menu, don't fallback to window open
+                    if (shareError.name !== 'AbortError') {
+                        throw shareError;
+                    }
                 }
-            } catch (e) {
-                // Fallback if the programmatic click fails entirely (extremely restrictive browsers)
-                console.error("Programmatic download failed, falling back to new window:", e);
-                const w = window.open('about:blank');
-                if (w) {
-                    const img = new Image();
-                    img.src = dataUrl;
-                    w.document.body.appendChild(img);
-                    w.document.write('<p>Toque e segure a imagem para salvar.</p>');
-                }
+            } else {
+                // Desktop / Android without share API fallback
+                const link = document.createElement("a");
+                link.download = `tweet-${Date.now()}.png`;
+                link.href = dataUrl;
+                link.click();
             }
 
             if (user) {
@@ -338,15 +320,14 @@ export function TwitterGenerator() {
                         {/* The Tweet Card */}
                         <div
                             className={cn(
-                                "p-6 rounded-xl",
-                                "relative max-w-full", // Ensure it handles stacking context correctly
+                                "p-6 transition-colors shadow-2xl relative",
+                                isDark ? "bg-[#000000] text-[#e7e9ea]" : "bg-white text-[#0f1419]",
                                 showBorder ? "border" : "border-0",
                                 // Width logic: Twitter (Auto) and Post (1:1) fixed at 400px maximum but can scale down, others at 500px maximum
                                 (aspectRatio === "auto" || aspectRatio === "1/1") ? "w-[400px]" : "w-[500px]",
                             )}
                             style={{
                                 boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
-                                backgroundColor: isDark ? '#000000' : '#ffffff',
                                 color: isDark ? '#ffffff' : '#000000',
                                 borderColor: isDark ? '#27272a' : '#e4e4e7',
                                 fontFamily: '"TwitterChirp", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
