@@ -441,12 +441,13 @@ export function ReelsCreator() {
             console.log("Render: extracting audio track...");
             let audioBuffer: AudioBuffer | null = null;
             try {
-                const response = await fetch(videoUrl!);
-                const arrayBuffer = await response.arrayBuffer();
+                if (!videoFile) throw new Error("Video File unavailable");
+                const arrayBuffer = await videoFile.arrayBuffer();
                 audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
                 console.log("Render: Audio decoded", { channels: audioBuffer.numberOfChannels, rate: audioBuffer.sampleRate });
-            } catch (e) {
-                console.warn("Audio extraction failed or video is silent.", e);
+            } catch (e: any) {
+                console.error("Audio extraction failed:", e);
+                alert("Aviso: Falha ao carregar o áudio original. O vídeo ficará mudo. (" + e.message + ")");
             }
 
             // --- Muxer & Encoder Setup ---
@@ -472,8 +473,8 @@ export function ReelsCreator() {
             if (audioBuffer) {
                 muxerOptions.audio = {
                     codec: 'aac',
-                    numberOfChannels: 2, // Force Stereo for maximum compatibility
-                    sampleRate: 48000 // Force 48000Hz for AAC standard
+                    numberOfChannels: audioBuffer.numberOfChannels,
+                    sampleRate: audioBuffer.sampleRate
                 };
             }
 
@@ -778,9 +779,9 @@ export function ReelsCreator() {
                     console.error("Export Error", err);
                     const msg = err instanceof Error ? err.message : String(err);
                     alert(`Erro ao finalizar vídeo: ${msg}. Tente recarregar a página.`);
+                    setIsRendering(false);
                 } finally {
                     isRenderingRef.current = false;
-                    setIsRendering(false);
 
                     // Cleanup
                     video.currentTime = 0;
@@ -1155,21 +1156,49 @@ export function ReelsCreator() {
                                 {/* Rendering Overlay */}
                                 {isRendering && (
                                     <div className="absolute inset-0 bg-zinc-950/90 flex flex-col items-center justify-center z-50 text-white backdrop-blur-md p-6 text-center">
+                                        {exportedBlob ? (
+                                            <div className="w-full max-w-[280px] flex flex-col items-center gap-6 animate-in zoom-in-95 duration-500">
+                                                <div className="w-20 h-20 bg-emerald-500 rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(16,185,129,0.3)] mb-2">
+                                                    <svg className="w-10 h-10 text-zinc-950" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                                                    </svg>
+                                                </div>
+                                                <h3 className="text-2xl font-bold text-white tracking-tight">Pronto!</h3>
 
-                                        <div className="w-full max-w-[240px] mb-6">
-                                            <div className="flex justify-between items-end mb-2">
-                                                <span className="text-sm font-bold text-sky-400">Renderizando</span>
-                                                <span className="text-xs font-mono text-zinc-400">
-                                                    {Math.min(100, Math.max(0, (renderStats.time / (renderStats.duration || 1)) * 100)).toFixed(0)}%
-                                                </span>
+                                                <button
+                                                    onClick={handleDownload}
+                                                    className="w-full py-4 bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 text-zinc-950 rounded-xl font-bold shadow-lg shadow-emerald-500/20 transition-all flex items-center justify-center gap-2"
+                                                >
+                                                    <Download className="w-5 h-5" />
+                                                    Salvar Reel / Compartilhar
+                                                </button>
+
+                                                <button
+                                                    onClick={() => {
+                                                        setExportedBlob(null);
+                                                        setIsRendering(false);
+                                                    }}
+                                                    className="text-zinc-400 hover:text-white transition-colors font-medium underline underline-offset-4 mt-2"
+                                                >
+                                                    Fechar
+                                                </button>
                                             </div>
-                                            <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden">
-                                                <div
-                                                    className="h-full bg-gradient-to-r from-sky-500 to-sky-400 transition-all duration-300 ease-out rounded-full"
-                                                    style={{ width: `${Math.min(100, Math.max(0, (renderStats.time / (renderStats.duration || 1)) * 100))}%` }}
-                                                />
+                                        ) : (
+                                            <div className="w-full max-w-[240px] mb-6">
+                                                <div className="flex justify-between items-end mb-2">
+                                                    <span className="text-sm font-bold text-sky-400">Renderizando</span>
+                                                    <span className="text-xs font-mono text-zinc-400">
+                                                        {Math.min(100, Math.max(0, (renderStats.time / (renderStats.duration || 1)) * 100)).toFixed(0)}%
+                                                    </span>
+                                                </div>
+                                                <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden">
+                                                    <div
+                                                        className="h-full bg-gradient-to-r from-sky-500 to-sky-400 transition-all duration-300 ease-out rounded-full"
+                                                        style={{ width: `${Math.min(100, Math.max(0, (renderStats.time / (renderStats.duration || 1)) * 100))}%` }}
+                                                    />
+                                                </div>
                                             </div>
-                                        </div>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -1210,38 +1239,15 @@ export function ReelsCreator() {
                             ))}
                         </div>
 
-                        {exportedBlob ? (
-                            <div className="flex flex-col gap-3">
-                                <button
-                                    onClick={handleDownload}
-                                    className="w-full py-4 bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 text-zinc-950 rounded-xl font-bold shadow-lg shadow-emerald-500/20 transition-all flex items-center justify-center gap-2"
-                                >
-                                    <Download className="w-5 h-5" />
-                                    Salvar Reel / Compartilhar
-                                </button>
-                                <button
-                                    onClick={() => setExportedBlob(null)}
-                                    className="w-full py-3 bg-zinc-800 text-zinc-300 rounded-xl font-medium transition-all flex items-center justify-center"
-                                >
-                                    Fazer Nova Alteração
-                                </button>
-                            </div>
-                        ) : (
-                            <button
-                                onClick={renderVideo}
-                                disabled={!selectedHeadline || isRendering || !videoUrl}
-                                className="w-full py-4 bg-gradient-to-r from-sky-400 to-sky-400 hover:from-sky-300 hover:to-sky-300 text-zinc-950 rounded-xl font-bold shadow-lg shadow-sky-400/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                                {isRendering ? (
-                                    "Renderizando Vídeo..."
-                                ) : (
-                                    <>
-                                        <Play className="w-5 h-5" />
-                                        Gerar Reel
-                                    </>
-                                )}
-                            </button>
-                        )}
+                        <button
+                            onClick={renderVideo}
+                            disabled={!selectedHeadline || isRendering || !videoUrl || exportedBlob !== null}
+                            className="w-full py-4 bg-gradient-to-r from-sky-400 to-sky-400 hover:from-sky-300 hover:to-sky-300 text-zinc-950 rounded-xl font-bold shadow-lg shadow-sky-400/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <Play className="w-5 h-5" />
+                            Gerar Reel
+                        </button>
+
                         <p className="text-center text-xs text-zinc-500 mt-2">
                             Exportação em {resolution} • 60fps • 12Mbps • AAC
                         </p>
