@@ -554,6 +554,7 @@ export function ReelsCreator() {
             console.log("Render: VideoEncoder configured.");
 
             let audioEncoder: AudioEncoder | null = null;
+            let resampledAudioBuffer: AudioBuffer | null = null;
 
             if (audioBuffer) {
                 audioEncoder = new AudioEncoder({
@@ -573,10 +574,10 @@ export function ReelsCreator() {
                 });
                 console.log("Render: AudioEncoder configured.");
 
-                // --- 1. Process Audio Offline (Max Compatibility) ---
+                // --- 1. Process Audio Offline (Resample Only) ---
                 const processAudio = async () => {
                     if (!audioEncoder || !audioBuffer) return;
-                    console.log("Render: Resampling to 48kHz Stereo & Encoding Audio...");
+                    console.log("Render: Resampling to 48kHz Stereo...");
                     try {
                         const targetSampleRate = 48000;
                         const targetChannels = 2;
@@ -592,56 +593,9 @@ export function ReelsCreator() {
                         source.start(0);
 
                         console.log("Render: Performing offline audio render...");
-                        const resampledBuffer = await offlineCtx.startRendering();
-                        const totalFrames = resampledBuffer.length;
-                        console.log("Render: Audio rendered successfully, feeding to AAC encoder...");
+                        resampledAudioBuffer = await offlineCtx.startRendering();
+                        console.log("Render: Audio resampled successfully, queued for interleaved encoding!");
 
-                        // Instead of planar f32 and manual tiny chunks sizes, we feed 1-second chunks of fully
-                        // INTERLEAVED f32 data, which is the most universally supported format by hardware WebCodecs.
-                        const chunkSize = targetSampleRate; // 1 second chunk
-                        let offset = 0;
-
-                        const ch0 = resampledBuffer.getChannelData(0);
-                        const ch1 = resampledBuffer.getChannelData(1);
-
-                        while (offset < totalFrames) {
-                            const size = Math.min(chunkSize, totalFrames - offset);
-                            const interleaved = new Float32Array(size * targetChannels);
-
-                            for (let i = 0; i < size; i++) {
-                                interleaved[i * 2] = ch0[offset + i];
-                                interleaved[i * 2 + 1] = ch1[offset + i];
-                            }
-
-                            const audioData = new AudioData({
-                                format: 'f32', // Interleaved Float32
-                                sampleRate: targetSampleRate,
-                                numberOfFrames: size,
-                                numberOfChannels: targetChannels,
-                                timestamp: Math.round((offset / targetSampleRate) * 1_000_000), // in microseconds
-                                data: interleaved
-                            });
-
-                            if (audioEncoder.state === 'configured') {
-                                audioEncoder.encode(audioData);
-                            }
-                            audioData.close();
-                            offset += size;
-
-                            // Yield to main thread to prevent UI freezing and throttle encoder queue
-                            while ((audioEncoder as any).encodeQueueSize > 5) {
-                                await new Promise(r => setTimeout(r, 10));
-                            }
-                        }
-
-                        // Wait for AudioEncoder to finish processing all chunks BEFORE moving on to video.
-                        // This guarantees audio works completely and frees hardware processing limits on older iPhones.
-                        if (audioEncoder.state === 'configured') {
-                            console.log("Render: Flushing audio encoder queue...");
-                            await audioEncoder.flush();
-                        }
-
-                        console.log("Render: Audio track successfully muxed.");
                     } catch (e: any) {
                         console.error("Audio processing failed:", e);
                         alert("Aviso: Falha ao processar áudio. O vídeo exportado possivelmente ficará mudo. (" + e.message + ")");
@@ -750,6 +704,45 @@ export function ReelsCreator() {
                     }
 
                     frame.close();
+
+                    // --- INTERLEAVED AUDIO ENCODING (PERFECT A/V SYNC FOR MP4/SAFARI) ---
+                    // By pushing audio chunks exactly synchronized with video frames,
+                    // mp4-muxer interleaves the 'mdat' boxes perfectly, satisfying Apple QuickTime requirements.
+                    if (audioEncoder && resampledAudioBuffer) {
+                        const targetSampleRate = 48000;
+                        const targetChannels = 2;
+
+                        // How many audio frames cover 1 video frame duration (1/60s)?
+                        const framesPerChunk = Math.ceil(targetSampleRate / FPS); // exactly 800 frames per 60fps chunk
+                        const offset = frameCount * framesPerChunk;
+                        const totalFrames = resampledAudioBuffer.length;
+
+                        if (offset < totalFrames) {
+                            const size = Math.min(framesPerChunk, totalFrames - offset);
+                            const interleaved = new Float32Array(size * targetChannels);
+                            const ch0 = resampledAudioBuffer.getChannelData(0);
+                            const ch1 = resampledAudioBuffer.getChannelData(1);
+
+                            for (let i = 0; i < size; i++) {
+                                interleaved[i * 2] = ch0[offset + i];
+                                interleaved[i * 2 + 1] = ch1[offset + i];
+                            }
+
+                            const audioData = new AudioData({
+                                format: 'f32',
+                                sampleRate: targetSampleRate,
+                                numberOfFrames: size,
+                                numberOfChannels: targetChannels,
+                                timestamp: Math.round((offset / targetSampleRate) * 1_000_000), // in microseconds
+                                data: interleaved
+                            });
+
+                            if ((audioEncoder as any).state === 'configured') {
+                                audioEncoder.encode(audioData);
+                            }
+                            audioData.close();
+                        }
+                    }
                     frameCount++;
 
                     if (isRenderingRef.current) {
