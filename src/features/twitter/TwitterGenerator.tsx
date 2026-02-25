@@ -14,7 +14,7 @@ export function TwitterGenerator() {
     const [text, setText] = useState("Digite seu tweet aqui...");
     const [avatar, setAvatar] = useState<string | null>(null);
     const [isVerified, setIsVerified] = useState(true);
-    const [isDark, setIsDark] = useState(true);
+    const [isDark, setIsDark] = useState(false);
     const [date, setDate] = useState("08:32 · 23/02/2026");
     const [views, setViews] = useState("1,5M");
     const [replies, setReplies] = useState("1,1k");
