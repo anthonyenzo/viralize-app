@@ -70,12 +70,17 @@ export function TwitterGenerator() {
 
             // iOS/Safari fix: call toPng a few times before taking the actual shot
             // as it sometimes fails to load images/SVG on the first pass
-            await toPng(previewRef.current, { pixelRatio: 1 });
-            await new Promise(r => setTimeout(r, 100));
+            await toPng(previewRef.current, {
+                pixelRatio: 1,
+                cacheBust: true,
+                skipFonts: true
+            });
+            await new Promise(r => setTimeout(r, 400)); // Increased wait for image decoding
 
             const dataUrl = await toPng(previewRef.current, {
                 pixelRatio: 4, // Ultra high resolution
                 backgroundColor: undefined, // Transparent background if not set
+                cacheBust: true
             });
 
             // Native Share API for Mobile Devices (Most reliable for iOS)
