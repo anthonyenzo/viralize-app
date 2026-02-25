@@ -498,8 +498,8 @@ export function ReelsCreator() {
             if (audioBuffer) {
                 muxerOptions.audio = {
                     codec: 'aac',
-                    numberOfChannels: audioBuffer.numberOfChannels,
-                    sampleRate: audioBuffer.sampleRate
+                    numberOfChannels: 2, // STRICT ALIGNMENT FOR iOS
+                    sampleRate: 48000    // STRICT ALIGNMENT FOR iOS
                 };
             }
 
@@ -560,57 +560,66 @@ export function ReelsCreator() {
                     output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
                     error: (e) => {
                         const msg = e.message || String(e);
-                        if (msg.includes('Flushing error')) {
-                            console.warn("AudioEncoder flushing error (ignored):", e);
-                            return;
-                        }
+                        if (msg.includes('Flushing error')) return;
                         console.error("AudioEncoder error:", e);
-                        alert(`Erro no codificador de áudio: ${msg}`);
                     }
                 });
 
                 audioEncoder.configure({
                     codec: 'mp4a.40.2', // AAC LC
-                    numberOfChannels: audioBuffer.numberOfChannels,
-                    sampleRate: audioBuffer.sampleRate,
-                    bitrate: Math.max(128_000, audioBuffer.numberOfChannels * 64_000), // Scale bitrate safely
+                    numberOfChannels: 2, // Strict iOS constraint
+                    sampleRate: 48000,
+                    bitrate: 128_000,
                 });
                 console.log("Render: AudioEncoder configured.");
 
                 // --- 1. Process Audio Offline (Max Compatibility) ---
                 const processAudio = async () => {
                     if (!audioEncoder || !audioBuffer) return;
-                    console.log("Render: encoding audio track (Manual Chunking)...");
+                    console.log("Render: Resampling to 48kHz Stereo & Encoding Audio...");
                     try {
-                        const targetSampleRate = audioBuffer.sampleRate;
-                        const targetChannels = audioBuffer.numberOfChannels;
-                        const totalFrames = audioBuffer.length;
+                        const targetSampleRate = 48000;
+                        const targetChannels = 2;
+                        const duration = audioBuffer.duration;
 
-                        // Use a larger chunk size to ensure AAC gets enough frames per request (1024 frames is standard)
-                        const chunkSize = 1024;
+                        // Safari needs Webkit prefixes
+                        const OfflineCtxClass = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext;
+                        const offlineCtx = new OfflineCtxClass(targetChannels, Math.ceil(targetSampleRate * duration), targetSampleRate);
+
+                        const source = offlineCtx.createBufferSource();
+                        source.buffer = audioBuffer;
+                        source.connect(offlineCtx.destination);
+                        source.start(0);
+
+                        console.log("Render: Performing offline audio render...");
+                        const resampledBuffer = await offlineCtx.startRendering();
+                        const totalFrames = resampledBuffer.length;
+                        console.log("Render: Audio rendered successfully, feeding to AAC encoder...");
+
+                        // Instead of planar f32 and manual tiny chunks sizes, we feed 1-second chunks of fully
+                        // INTERLEAVED f32 data, which is the most universally supported format by hardware WebCodecs.
+                        const chunkSize = targetSampleRate; // 1 second chunk
                         let offset = 0;
+
+                        const ch0 = resampledBuffer.getChannelData(0);
+                        const ch1 = resampledBuffer.getChannelData(1);
 
                         while (offset < totalFrames) {
                             const size = Math.min(chunkSize, totalFrames - offset);
+                            const interleaved = new Float32Array(size * targetChannels);
 
-                            // AAC Encoders on Safari strictly expect 'f32-planar' for multi-channel AudioData
-                            const planarData = new Float32Array(size * targetChannels);
-                            for (let ch = 0; ch < targetChannels; ch++) {
-                                // .getChannelData returns the full float32 array for that channel
-                                const bufferChannelData = audioBuffer.getChannelData(ch);
-                                for (let i = 0; i < size; i++) {
-                                    // Interleave planar: All Ch0 first, then all Ch1, etc.
-                                    planarData[ch * size + i] = bufferChannelData[offset + i];
-                                }
+                            for (let i = 0; i < size; i++) {
+                                interleaved[i * 2] = ch0[offset + i];
+                                interleaved[i * 2 + 1] = ch1[offset + i];
                             }
 
                             const audioData = new AudioData({
-                                format: 'f32-planar',
+                                format: 'f32', // Interleaved Float32
                                 sampleRate: targetSampleRate,
                                 numberOfFrames: size,
                                 numberOfChannels: targetChannels,
                                 timestamp: Math.round((offset / targetSampleRate) * 1_000_000), // in microseconds
-                                data: planarData
+                                data: interleaved
                             });
 
                             if (audioEncoder.state === 'configured') {
@@ -619,16 +628,23 @@ export function ReelsCreator() {
                             audioData.close();
                             offset += size;
 
-                            // Yield to main thread briefly every few chunks to prevent freezing
-                            if (offset % (chunkSize * 50) === 0) {
-                                await new Promise(r => setTimeout(r, 0));
+                            // Yield to main thread to prevent UI freezing and throttle encoder queue
+                            while ((audioEncoder as any).encodeQueueSize > 5) {
+                                await new Promise(r => setTimeout(r, 10));
                             }
                         }
 
-                        console.log("Render: Audio track encoded successfully.");
+                        // Wait for AudioEncoder to finish processing all chunks BEFORE moving on to video.
+                        // This guarantees audio works completely and frees hardware processing limits on older iPhones.
+                        if (audioEncoder.state === 'configured') {
+                            console.log("Render: Flushing audio encoder queue...");
+                            await audioEncoder.flush();
+                        }
+
+                        console.log("Render: Audio track successfully muxed.");
                     } catch (e: any) {
-                        console.error("Audio encoding failed:", e);
-                        alert("Não foi possível processar o áudio (" + e.message + "). O vídeo pode ficar mudo.");
+                        console.error("Audio processing failed:", e);
+                        alert("Aviso: Falha ao processar áudio. O vídeo exportado possivelmente ficará mudo. (" + e.message + ")");
                     }
                 };
 
