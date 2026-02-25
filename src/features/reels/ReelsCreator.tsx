@@ -450,6 +450,8 @@ export function ReelsCreator() {
                 alert("Aviso: Falha ao carregar o áudio original. O vídeo ficará mudo. (" + e.message + ")");
             }
 
+
+
             // --- Muxer & Encoder Setup ---
             console.log("Render: Importing Muxer...");
             const { Muxer, ArrayBufferTarget } = await import('mp4-muxer');
@@ -555,39 +557,26 @@ export function ReelsCreator() {
                 // --- 1. Process Audio Offline (Max Compatibility) ---
                 const processAudio = async () => {
                     if (!audioEncoder || !audioBuffer) return;
-                    console.log("Render: encoding audio track...");
+                    console.log("Render: encoding audio track (Manual Chunking)...");
                     try {
-                        const targetSampleRate = 48000;
-                        const targetChannels = 2;
-                        const duration = audioBuffer.duration;
+                        const targetSampleRate = audioBuffer.sampleRate;
+                        const targetChannels = audioBuffer.numberOfChannels;
+                        const totalFrames = audioBuffer.length;
 
-                        // Resample directly via OfflineAudioContext to guarantee 48000Hz Stereo
-                        const offlineCtx = new (window.OfflineAudioContext || (window as any).webkitOfflineAudioContext)(
-                            targetChannels,
-                            Math.ceil(targetSampleRate * duration),
-                            targetSampleRate
-                        );
-                        const source = offlineCtx.createBufferSource();
-                        source.buffer = audioBuffer;
-                        source.connect(offlineCtx.destination);
-                        source.start(0);
-
-                        const resampledBuffer = await offlineCtx.startRendering();
-                        const totalFrames = resampledBuffer.length;
-
-                        // 1024 frames is a standard block size that Web Audio API handles well natively
+                        // Use a larger chunk size to ensure AAC gets enough frames per request (1024 frames is standard)
                         const chunkSize = 1024;
                         let offset = 0;
 
                         while (offset < totalFrames) {
                             const size = Math.min(chunkSize, totalFrames - offset);
 
-                            // For maximum browser compatibility (specifically iOS Safari), we use 'f32-planar'
-                            // BUT we ensure it's strictly 2 channels, 48000Hz after resampling.
+                            // AAC Encoders on Safari strictly expect 'f32-planar' for multi-channel AudioData
                             const planarData = new Float32Array(size * targetChannels);
                             for (let ch = 0; ch < targetChannels; ch++) {
-                                const bufferChannelData = resampledBuffer.getChannelData(ch);
+                                // .getChannelData returns the full float32 array for that channel
+                                const bufferChannelData = audioBuffer.getChannelData(ch);
                                 for (let i = 0; i < size; i++) {
+                                    // Interleave planar: All Ch0 first, then all Ch1, etc.
                                     planarData[ch * size + i] = bufferChannelData[offset + i];
                                 }
                             }
@@ -597,23 +586,26 @@ export function ReelsCreator() {
                                 sampleRate: targetSampleRate,
                                 numberOfFrames: size,
                                 numberOfChannels: targetChannels,
-                                timestamp: Math.round(offset * 1_000_000 / targetSampleRate),
+                                timestamp: Math.round((offset / targetSampleRate) * 1_000_000), // in microseconds
                                 data: planarData
                             });
 
-                            audioEncoder.encode(audioData);
+                            if (audioEncoder.state === 'configured') {
+                                audioEncoder.encode(audioData);
+                            }
                             audioData.close();
                             offset += size;
 
-                            // Yield to main thread briefly every block chunks
+                            // Yield to main thread briefly every few chunks to prevent freezing
                             if (offset % (chunkSize * 50) === 0) {
                                 await new Promise(r => setTimeout(r, 0));
                             }
                         }
 
                         console.log("Render: Audio track encoded successfully.");
-                    } catch (e) {
+                    } catch (e: any) {
                         console.error("Audio encoding failed:", e);
+                        alert("Não foi possível processar o áudio (" + e.message + "). O vídeo pode ficar mudo.");
                     }
                 };
 
@@ -623,15 +615,17 @@ export function ReelsCreator() {
             // --- Prep Playback (Visual Only) ---
             video.currentTime = 0;
             video.loop = false;
-            video.muted = true; // Mute to allow fast playback without distorting system audio
 
-            // 720p is fast enough for 1.0x (Real-time).
-            // 1080p is heavy (2.25x pixels), so we slow down to 0.5x to give the renderer time to capture every frame without dropping.
-            // Timestamps are based on video time, so output speed is correct.
-            const playbackSpeed = resolution === '1080p' ? 0.5 : 1.0;
+            // CRITICAL: For iOS Safari Audio Capture through MediaElementAudioSourceNode to work,
+            // the video CANNOT be muted, BUT since we intercepted it through `sourceNode`, 
+            // it won't play through speakers anyway.
+            video.muted = false;
+
+            // 1.0x (Real-time) is required for audio sync!
+            const playbackSpeed = 1.0;
             video.playbackRate = playbackSpeed;
 
-            console.log(`Render: Starting playback (Visuals) at ${playbackSpeed}x speed...`);
+            console.log(`Render: Starting playback (A/V Sync) at ${playbackSpeed}x speed...`);
             try {
                 await video.play();
             } catch (e: any) {
@@ -788,6 +782,7 @@ export function ReelsCreator() {
                     video.playbackRate = 1.0;
                     video.loop = true;
                     video.play();
+
                     setIsPlaying(true);
                 }
             };
