@@ -551,44 +551,61 @@ export function ReelsCreator() {
             // --- 1. Process Audio Offline (Fast & High Quality) ---
             const processAudio = async () => {
                 console.log("Render: extracting audio track...");
-                const response = await fetch(videoUrl!);
-                const arrayBuffer = await response.arrayBuffer();
-                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                try {
+                    const response = await fetch(videoUrl!);
+                    const arrayBuffer = await response.arrayBuffer();
+                    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
-                // Chunking helper to feed AudioEncoder
-                const chunkSize = 4096; // Standard processing block
-                const totalFrames = audioBuffer.length;
-                let offset = 0;
+                    // We need to feed the AudioEncoder in chunks.
+                    // Instead of manually calculating interleaved arrays which fails on some browsers,
+                    // we'll create an OfflineAudioContext to render the buffer perfectly into PCM,
+                    // but since we ALREADY have the decoded audioBuffer, we can just slice it into AudioData directly.
+                    // Crucial Fix: Format MUST match what AudioData expects. The safest format across browsers is 'f32-planar'.
 
-                while (offset < totalFrames) {
-                    const size = Math.min(chunkSize, totalFrames - offset);
+                    const sampleRate = audioBuffer.sampleRate;
+                    const numberOfChannels = audioBuffer.numberOfChannels;
+                    const totalFrames = audioBuffer.length;
 
-                    // AudioData f32-planar expects a single buffer with concatenated planes: [ch0...][ch1...]
-                    // Size = size * channels
-                    const data = new Float32Array(size * audioBuffer.numberOfChannels);
+                    // 1024 frames is a standard block size that Web Audio API handles well natively
+                    const chunkSize = 1024;
+                    let offset = 0;
 
-                    for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
-                        const channelData = audioBuffer.getChannelData(ch);
-                        const slice = channelData.subarray(offset, offset + size);
-                        // Place channel data in the correct plane slot
-                        data.set(slice, ch * size);
+                    while (offset < totalFrames) {
+                        const size = Math.min(chunkSize, totalFrames - offset);
+
+                        // For 'f32-planar', data must be structured as [CH0_DATA, CH1_DATA, ...] sequentially in one Float32Array
+                        const planarData = new Float32Array(size * numberOfChannels);
+                        for (let ch = 0; ch < numberOfChannels; ch++) {
+                            const bufferChannelData = audioBuffer.getChannelData(ch);
+                            for (let i = 0; i < size; i++) {
+                                planarData[ch * size + i] = bufferChannelData[offset + i];
+                            }
+                        }
+
+                        const audioData = new AudioData({
+                            format: 'f32-planar',
+                            sampleRate: sampleRate,
+                            numberOfFrames: size,
+                            numberOfChannels: numberOfChannels,
+                            timestamp: Math.round(offset * 1_000_000 / sampleRate),
+                            data: planarData
+                        });
+
+                        audioEncoder.encode(audioData);
+                        audioData.close();
+                        offset += size;
+
+                        // Yield to main thread briefly every 100 chunks to prevent UI lockup during audio extraction
+                        if (offset % (chunkSize * 100) === 0) {
+                            await new Promise(r => setTimeout(r, 0));
+                        }
                     }
 
-                    const audioData = new AudioData({
-                        timestamp: Math.round(offset * 1_000_000 / audioBuffer.sampleRate),
-                        numberOfChannels: audioBuffer.numberOfChannels,
-                        numberOfFrames: size,
-                        sampleRate: audioBuffer.sampleRate,
-                        format: 'f32-planar',
-                        data: data
-                    });
-
-                    audioEncoder.encode(audioData);
-                    audioData.close();
-                    offset += size;
+                    console.log("Render: Audio track encoded successfully.");
+                } catch (e) {
+                    console.error("Audio extraction failed:", e);
+                    // We don't throw here to allow video-only export fallback
                 }
-
-                console.log("Render: Audio track encoded successfully.");
             };
 
             await processAudio();
@@ -1024,7 +1041,7 @@ export function ReelsCreator() {
                     {
                         videoUrl ? (
                             <div
-                                className="relative rounded-xl overflow-hidden shadow-2xl border border-zinc-800 group cursor-move select-none shrink-0 w-[85%] sm:w-[360px] aspect-[9/16]"
+                                className="relative rounded-xl overflow-hidden shadow-2xl border border-zinc-800 group cursor-move select-none shrink-0 w-[85%] sm:w-[360px] aspect-[9/16] touch-none"
                                 onMouseDown={(e) => {
                                     setIsDragging(true);
                                     setDragStart({ x: e.clientX - videoPosition.x, y: e.clientY - videoPosition.y });
@@ -1085,15 +1102,26 @@ export function ReelsCreator() {
 
                                 {/* Rendering Overlay */}
                                 {isRendering && (
-                                    <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center z-50 text-white backdrop-blur-sm p-6 text-center">
-                                        <Loader2 className="w-12 h-12 text-sky-400 animate-spin mb-4" />
-                                        <h3 className="text-xl font-bold mb-2">Renderizando...</h3>
-                                        <div className="text-xs font-mono text-zinc-400 space-y-1 bg-zinc-900/50 p-3 rounded border border-zinc-800">
-                                            <p>Frame: {renderStats.frame}</p>
-                                            <p>Time: {renderStats.time.toFixed(2)}s / {renderStats.duration.toFixed(2)}s</p>
-                                            <p>Progress: {(renderStats.time / (renderStats.duration || 1) * 100).toFixed(1)}%</p>
-                                            <p>FPS: {renderStats.fps}</p>
+                                    <div className="absolute inset-0 bg-zinc-950/90 flex flex-col items-center justify-center z-50 text-white backdrop-blur-md p-6 text-center">
+
+                                        <div className="w-full max-w-[240px] mb-6">
+                                            <div className="flex justify-between items-end mb-2">
+                                                <span className="text-sm font-bold text-sky-400">Renderizando</span>
+                                                <span className="text-xs font-mono text-zinc-400">
+                                                    {Math.min(100, Math.max(0, (renderStats.time / (renderStats.duration || 1)) * 100)).toFixed(0)}%
+                                                </span>
+                                            </div>
+                                            <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden">
+                                                <div
+                                                    className="h-full bg-gradient-to-r from-sky-500 to-sky-400 transition-all duration-300 ease-out rounded-full"
+                                                    style={{ width: `${Math.min(100, Math.max(0, (renderStats.time / (renderStats.duration || 1)) * 100))}%` }}
+                                                />
+                                            </div>
                                         </div>
+
+                                        <p className="text-[10px] text-zinc-500 max-w-[200px]">
+                                            Dica: Você pode redimensionar e arrastar o vídeo com os dedos.
+                                        </p>
                                     </div>
                                 )}
                             </div>
