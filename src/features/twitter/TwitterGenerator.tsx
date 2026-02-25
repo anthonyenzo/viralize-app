@@ -5,6 +5,43 @@ import { cn } from "../../lib/utils";
 import { useAppStore } from "../../store/useAppStore";
 import { useAuthStore } from "../../store/useAuthStore";
 
+// Helper function to resize Base64 images to prevent crashing mobile browsers when rendering SVG canvases
+const resizeImage = (base64Str: string, maxWidth = 200, maxHeight = 200): Promise<string> => {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.src = base64Str;
+        img.onload = () => {
+            const canvas = document.createElement("canvas");
+            let width = img.width;
+            let height = img.height;
+
+            if (width > height) {
+                if (width > maxWidth) {
+                    height = Math.round((height * maxWidth) / width);
+                    width = maxWidth;
+                }
+            } else {
+                if (height > maxHeight) {
+                    width = Math.round((width * maxHeight) / height);
+                    height = maxHeight;
+                }
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+                ctx.drawImage(img, 0, 0, width, height);
+                // Convert to compressed jpeg to reduce Base64 size footprint by up to 90%
+                resolve(canvas.toDataURL("image/jpeg", 0.9));
+            } else {
+                resolve(base64Str);
+            }
+        };
+        img.onerror = () => resolve(base64Str);
+    });
+};
+
 export function TwitterGenerator() {
     const { incrementTwitter } = useAppStore();
     const { user } = useAuthStore();
@@ -34,11 +71,18 @@ export function TwitterGenerator() {
         const savedProfile = localStorage.getItem("viralize-twitter-profile");
         if (savedProfile) {
             try {
-                const { avatar, name, username, isVerified } = JSON.parse(savedProfile);
-                if (avatar) setAvatar(avatar);
-                if (name) setName(name);
-                if (username) setUsername(username);
-                if (typeof isVerified === 'boolean') setIsVerified(isVerified);
+                const { avatar: savedAvatar, name: savedName, username: savedUsername, isVerified: savedVerified } = JSON.parse(savedProfile);
+                if (savedName) setName(savedName);
+                if (savedUsername) setUsername(savedUsername);
+                if (typeof savedVerified === 'boolean') setIsVerified(savedVerified);
+                if (savedAvatar) {
+                    // Preemptively resize heavy legacy avatars from storage to prevent mobile lockups
+                    if (savedAvatar.length > 200_000) {
+                        resizeImage(savedAvatar).then(resized => setAvatar(resized));
+                    } else {
+                        setAvatar(savedAvatar);
+                    }
+                }
             } catch (e) {
                 console.error("Failed to load profile", e);
             }
@@ -55,7 +99,15 @@ export function TwitterGenerator() {
         const file = e.target.files?.[0];
         if (file) {
             const reader = new FileReader();
-            reader.onloadend = () => setAvatar(reader.result as string);
+            reader.onloadend = async () => {
+                const result = reader.result as string;
+                if (result.length > 100_000) {
+                    const resized = await resizeImage(result);
+                    setAvatar(resized);
+                } else {
+                    setAvatar(result);
+                }
+            };
             reader.readAsDataURL(file);
         }
     };
@@ -352,11 +404,9 @@ export function TwitterGenerator() {
                                     >
                                         {avatar ? (
                                             // Explicitly size the img for html-to-image reliability
-                                            // crossOrigin helps some browsers process the base64 string
                                             <img
                                                 src={avatar}
                                                 alt="Avatar"
-                                                crossOrigin="anonymous"
                                                 className="w-12 h-12 object-cover absolute top-0 left-0"
                                                 width="48"
                                                 height="48"
