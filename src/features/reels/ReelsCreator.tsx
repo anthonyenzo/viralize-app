@@ -459,10 +459,33 @@ export function ReelsCreator() {
             // Fixed Frame Rate: 60fps (CapCut Standard)
             const FPS = 60;
 
+            // Video Codec Resolution & Selection (H.265 / HEVC)
+            let selectedCodec = 'hev1.1.6.L120.90'; // HEVC Main Profile Level 4.0
+            let muxerVideoCodec: 'hevc' | 'avc' = 'hevc';
+
+            if ('isConfigSupported' in VideoEncoder) {
+                try {
+                    const support = await (VideoEncoder as any).isConfigSupported({
+                        codec: selectedCodec,
+                        width: targetWidth,
+                        height: targetHeight,
+                        bitrate: 12_000_000,
+                        framerate: FPS,
+                    });
+                    if (!support.supported) {
+                        console.warn("H.265 (HEVC) not supported on this browser, falling back to H.264 (AVC)");
+                        selectedCodec = 'avc1.4D4028';
+                        muxerVideoCodec = 'avc';
+                    } else {
+                        console.log("H.265 (HEVC) support confirmed!");
+                    }
+                } catch (e) { }
+            }
+
             const muxerOptions: any = {
                 target: new ArrayBufferTarget(),
                 video: {
-                    codec: 'avc', // H.264
+                    codec: muxerVideoCodec,
                     width: targetWidth,
                     height: targetHeight,
                     frameRate: FPS
@@ -508,7 +531,7 @@ export function ReelsCreator() {
             });
 
             const videoConfig: VideoEncoderConfig = {
-                codec: 'avc1.4D4028', // H.264 Main Profile Level 4.0 (Universal iOS/Android compatibility)
+                codec: selectedCodec,
                 width: targetWidth,
                 height: targetHeight,
                 bitrate: 12_000_000, // 12 Mbps (User Requested)
@@ -522,7 +545,7 @@ export function ReelsCreator() {
                 (VideoEncoder as any).isConfigSupported(videoConfig).then((support: any) => {
                     console.log(`Video Config Supported: ${support.supported}`, support);
                     if (!support.supported) {
-                        alert(`Aviso: Seu navegador pode não suportar esta resolução/codec (${videoConfig.codec}). A exportação pode falhar. Tente usar o Chrome ou Edge.`);
+                        alert(`Aviso: Seu navegador não suporta exportar em H.265 nativamente ou nesta resolução. Tente usar o Chrome atualizado.`);
                     }
                 }).catch((e: any) => console.error("Check support error", e));
             }
@@ -548,9 +571,9 @@ export function ReelsCreator() {
 
                 audioEncoder.configure({
                     codec: 'mp4a.40.2', // AAC LC
-                    numberOfChannels: 2,
-                    sampleRate: 48000,
-                    bitrate: 128_000, // Standard bitrate
+                    numberOfChannels: audioBuffer.numberOfChannels,
+                    sampleRate: audioBuffer.sampleRate,
+                    bitrate: Math.max(128_000, audioBuffer.numberOfChannels * 64_000), // Scale bitrate safely
                 });
                 console.log("Render: AudioEncoder configured.");
 
@@ -615,17 +638,15 @@ export function ReelsCreator() {
             // --- Prep Playback (Visual Only) ---
             video.currentTime = 0;
             video.loop = false;
+            video.muted = true; // Mute to allow fast playback without distorting system audio
 
-            // CRITICAL: For iOS Safari Audio Capture through MediaElementAudioSourceNode to work,
-            // the video CANNOT be muted, BUT since we intercepted it through `sourceNode`, 
-            // it won't play through speakers anyway.
-            video.muted = false;
-
-            // 1.0x (Real-time) is required for audio sync!
-            const playbackSpeed = 1.0;
+            // Timestamps are based on video time, so output speed is correct.
+            // 720p is fast enough for 1.0x (Real-time).
+            // 1080p is heavy (2.25x pixels), so we slow down to 0.75x to give the renderer time to capture every frame smoothly.
+            const playbackSpeed = resolution === '1080p' ? 0.75 : 1.0;
             video.playbackRate = playbackSpeed;
 
-            console.log(`Render: Starting playback (A/V Sync) at ${playbackSpeed}x speed...`);
+            console.log(`Render: Starting playback (Visuals) at ${playbackSpeed}x speed...`);
             try {
                 await video.play();
             } catch (e: any) {
