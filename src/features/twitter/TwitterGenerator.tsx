@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { Download, Upload, Moon, Sun, Settings as SettingsIcon, MessageCircle, Repeat2, Heart, Bookmark } from "lucide-react";
-import html2canvas from "html2canvas";
+import { toBlob, toPng } from "html-to-image";
 import { cn } from "../../lib/utils";
 import { useAppStore } from "../../store/useAppStore";
 import { useAuthStore } from "../../store/useAuthStore";
@@ -68,36 +68,47 @@ export function TwitterGenerator() {
         try {
             setIsDownloading(true);
 
-            // Use html2canvas instead of html-to-image for better iOS Safari compatibility
-            // especially with external/base64 avatars
-            const canvas = await html2canvas(previewRef.current, {
-                scale: 4, // High resolution
-                useCORS: true,
-                allowTaint: true,
-                backgroundColor: null, // Transparent if needed
-                logging: false
-            });
-            const dataUrl = canvas.toDataURL("image/png");
+            // Determine if the device is purely mobile to adjust pixelRatio and logic
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            const exportScale = isMobile ? 3 : 4; // Lower scale on mobile prevents memory crashes
 
-            // Native Share API for Mobile Devices (Most reliable for iOS)
-            if (navigator.share && /iPad|iPhone|iPod|Android/.test(navigator.userAgent)) {
+            // iOS/Safari fix: preliminary render to cache DOM nodes/images
+            await toPng(previewRef.current, {
+                pixelRatio: 1,
+                cacheBust: true,
+                skipFonts: true
+            }).catch(() => { }); // ignore warmup errors
+            await new Promise(r => setTimeout(r, 500));
+
+            // If mobile Native Share is supported, toBlob is much safer/faster than a giant base64 dataUrl
+            if (navigator.share && isMobile) {
+                const blob = await toBlob(previewRef.current, {
+                    pixelRatio: exportScale,
+                    cacheBust: true,
+                    backgroundColor: undefined
+                });
+
+                if (!blob) throw new Error("Falha ao gerar a imagem no formato Blob.");
+
+                const file = new File([blob], `tweet-${Date.now()}.png`, { type: 'image/png' });
                 try {
-                    const response = await fetch(dataUrl);
-                    const blob = await response.blob();
-                    const file = new File([blob], `tweet-${Date.now()}.png`, { type: 'image/png' });
-
                     await navigator.share({
                         title: 'Post Gerado via Viralize',
                         files: [file]
                     });
                 } catch (shareError: any) {
-                    // AbortError is expected if user cancelled the share menu, don't fallback to window open
                     if (shareError.name !== 'AbortError') {
                         throw shareError;
                     }
                 }
             } else {
-                // Desktop / Android without share API fallback
+                // Desktop or browsers without Share API fallback
+                const dataUrl = await toPng(previewRef.current, {
+                    pixelRatio: exportScale,
+                    cacheBust: true,
+                    backgroundColor: undefined
+                });
+
                 const link = document.createElement("a");
                 link.download = `tweet-${Date.now()}.png`;
                 link.href = dataUrl;
@@ -109,7 +120,8 @@ export function TwitterGenerator() {
             }
         } catch (error) {
             console.error("Export failed:", error);
-            alert("Erro ao baixar a imagem. Tente novamente.");
+            // On mobile, if all else fails, show a more descriptive error or fallback
+            alert("Ocorreu um erro ao gerar a imagem. Verifique se a foto do perfil não é muito pesada ou tente usar outro navegador.");
         } finally {
             setIsDownloading(false);
         }
