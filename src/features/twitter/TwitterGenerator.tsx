@@ -21,9 +21,9 @@ export function TwitterGenerator() {
     const [retweets, setRetweets] = useState("1k");
     const [likes, setLikes] = useState("21,9k");
     const [bookmarks, setBookmarks] = useState("701");
-    const [showDate, setShowDate] = useState(true);
-    const [showMetrics, setShowMetrics] = useState(true);
-    const [showBorder, setShowBorder] = useState(true);
+    const [showDate, setShowDate] = useState(false);
+    const [showMetrics, setShowMetrics] = useState(false);
+    const [showBorder, setShowBorder] = useState(false);
     const [fontSize, setFontSize] = useState(20);
 
     const [aspectRatio, setAspectRatio] = useState<"auto" | "1/1" | "9/16" | "3/4">("auto");
@@ -68,16 +68,59 @@ export function TwitterGenerator() {
         try {
             setIsDownloading(true);
 
-            // Use html-to-image which supports modern CSS (oklch, varies, etc)
+            // iOS/Safari fix: call toPng a few times before taking the actual shot
+            // as it sometimes fails to load images/SVG on the first pass
+            await toPng(previewRef.current, { pixelRatio: 1 });
+            await new Promise(r => setTimeout(r, 100));
+
             const dataUrl = await toPng(previewRef.current, {
                 pixelRatio: 4, // Ultra high resolution
                 backgroundColor: undefined, // Transparent background if not set
             });
 
-            const link = document.createElement("a");
-            link.download = `tweet-${Date.now()}.png`;
-            link.href = dataUrl;
-            link.click();
+            // Mobile-safe download handling
+            try {
+                // Determine if device is purely iOS (iPhone/iPad/iPod)
+                const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+                if (isIOS) {
+                    // Method 1: On iOS, forcing a new window with base64 can fail or be blocked.
+                    // The most reliable way is often to convert dataURl to Blob, create object URL, and trigger download.
+                    const response = await fetch(dataUrl);
+                    const blob = await response.blob();
+                    const objectUrl = window.URL.createObjectURL(blob);
+
+                    const link = document.createElement("a");
+                    link.style.display = "none";
+                    link.href = objectUrl;
+                    link.download = `tweet-${Date.now()}.png`;
+                    document.body.appendChild(link);
+                    link.click();
+
+                    // Cleanup
+                    setTimeout(() => {
+                        window.URL.revokeObjectURL(objectUrl);
+                        document.body.removeChild(link);
+                    }, 1000);
+                } else {
+                    // Method 2: Standard download for Android / Desktop
+                    const link = document.createElement("a");
+                    link.download = `tweet-${Date.now()}.png`;
+                    link.href = dataUrl;
+                    link.click();
+                }
+            } catch (e) {
+                // Fallback if the programmatic click fails entirely (extremely restrictive browsers)
+                console.error("Programmatic download failed, falling back to new window:", e);
+                const w = window.open('about:blank');
+                if (w) {
+                    const img = new Image();
+                    img.src = dataUrl;
+                    w.document.body.appendChild(img);
+                    w.document.write('<p>Toque e segure a imagem para salvar.</p>');
+                }
+            }
+
             if (user) {
                 incrementTwitter(user.id);
             }
