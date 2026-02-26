@@ -498,8 +498,8 @@ export function ReelsCreator() {
             if (audioBuffer) {
                 muxerOptions.audio = {
                     codec: 'aac',
-                    numberOfChannels: 2, // STRICT ALIGNMENT FOR iOS
-                    sampleRate: 48000    // STRICT ALIGNMENT FOR iOS
+                    numberOfChannels: audioBuffer.numberOfChannels,
+                    sampleRate: audioBuffer.sampleRate
                 };
             }
 
@@ -554,7 +554,7 @@ export function ReelsCreator() {
             console.log("Render: VideoEncoder configured.");
 
             let audioEncoder: AudioEncoder | null = null;
-            let resampledAudioBuffer: AudioBuffer | null = null;
+            let audioFramesEncoded = 0;
 
             if (audioBuffer) {
                 audioEncoder = new AudioEncoder({
@@ -568,41 +568,11 @@ export function ReelsCreator() {
 
                 audioEncoder.configure({
                     codec: 'mp4a.40.2', // AAC LC
-                    numberOfChannels: 2, // Strict iOS constraint
-                    sampleRate: 48000,
-                    bitrate: 128_000,
+                    numberOfChannels: audioBuffer.numberOfChannels,
+                    sampleRate: audioBuffer.sampleRate,
+                    bitrate: Math.max(128_000, audioBuffer.numberOfChannels * 64_000),
                 });
                 console.log("Render: AudioEncoder configured.");
-
-                // --- 1. Process Audio Offline (Resample Only) ---
-                const processAudio = async () => {
-                    if (!audioEncoder || !audioBuffer) return;
-                    console.log("Render: Resampling to 48kHz Stereo...");
-                    try {
-                        const targetSampleRate = 48000;
-                        const targetChannels = 2;
-                        const duration = audioBuffer.duration;
-
-                        // Safari needs Webkit prefixes
-                        const OfflineCtxClass = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext;
-                        const offlineCtx = new OfflineCtxClass(targetChannels, Math.ceil(targetSampleRate * duration), targetSampleRate);
-
-                        const source = offlineCtx.createBufferSource();
-                        source.buffer = audioBuffer;
-                        source.connect(offlineCtx.destination);
-                        source.start(0);
-
-                        console.log("Render: Performing offline audio render...");
-                        resampledAudioBuffer = await offlineCtx.startRendering();
-                        console.log("Render: Audio resampled successfully, queued for interleaved encoding!");
-
-                    } catch (e: any) {
-                        console.error("Audio processing failed:", e);
-                        alert("Aviso: Falha ao processar áudio. O vídeo exportado possivelmente ficará mudo. (" + e.message + ")");
-                    }
-                };
-
-                await processAudio();
             }
 
             // --- Prep Playback (Visual Only) ---
@@ -706,41 +676,41 @@ export function ReelsCreator() {
                     frame.close();
 
                     // --- INTERLEAVED AUDIO ENCODING (PERFECT A/V SYNC FOR MP4/SAFARI) ---
-                    // By pushing audio chunks exactly synchronized with video frames,
-                    // mp4-muxer interleaves the 'mdat' boxes perfectly, satisfying Apple QuickTime requirements.
-                    if (audioEncoder && resampledAudioBuffer) {
-                        const targetSampleRate = 48000;
-                        const targetChannels = 2;
+                    if (audioEncoder && audioBuffer) {
+                        const targetSampleRate = audioBuffer.sampleRate;
+                        const targetChannels = audioBuffer.numberOfChannels;
 
-                        // How many audio frames cover 1 video frame duration (1/60s)?
-                        const framesPerChunk = Math.ceil(targetSampleRate / FPS); // exactly 800 frames per 60fps chunk
-                        const offset = frameCount * framesPerChunk;
-                        const totalFrames = resampledAudioBuffer.length;
+                        // We encode audio precisely up to the current video timestamp bounds
+                        const requiredAudioFrames = Math.floor(currentVideoTime * targetSampleRate);
+                        const framesToEncode = requiredAudioFrames - audioFramesEncoded;
 
-                        if (offset < totalFrames) {
-                            const size = Math.min(framesPerChunk, totalFrames - offset);
-                            const interleaved = new Float32Array(size * targetChannels);
-                            const ch0 = resampledAudioBuffer.getChannelData(0);
-                            const ch1 = resampledAudioBuffer.getChannelData(1);
+                        if (framesToEncode > 0 && audioFramesEncoded < audioBuffer.length) {
+                            const size = Math.min(framesToEncode, audioBuffer.length - audioFramesEncoded);
 
-                            for (let i = 0; i < size; i++) {
-                                interleaved[i * 2] = ch0[offset + i];
-                                interleaved[i * 2 + 1] = ch1[offset + i];
+                            // Web Audio original format: f32-planar
+                            const planarData = new Float32Array(size * targetChannels);
+                            for (let ch = 0; ch < targetChannels; ch++) {
+                                const chData = audioBuffer.getChannelData(ch);
+                                for (let i = 0; i < size; i++) {
+                                    planarData[ch * size + i] = chData[audioFramesEncoded + i];
+                                }
                             }
 
                             const audioData = new AudioData({
-                                format: 'f32',
+                                format: 'f32-planar',
                                 sampleRate: targetSampleRate,
                                 numberOfFrames: size,
                                 numberOfChannels: targetChannels,
-                                timestamp: Math.round((offset / targetSampleRate) * 1_000_000), // in microseconds
-                                data: interleaved
+                                timestamp: Math.round((audioFramesEncoded / targetSampleRate) * 1_000_000),
+                                data: planarData
                             });
 
                             if ((audioEncoder as any).state === 'configured') {
                                 audioEncoder.encode(audioData);
                             }
                             audioData.close();
+
+                            audioFramesEncoded += size;
                         }
                     }
                     frameCount++;
@@ -761,7 +731,37 @@ export function ReelsCreator() {
                     // 1. Stop Loop
                     isRenderingRef.current = false;
 
-                    // 2. Flush Encoders
+                    // 2. Encode remaining audio tail
+                    if (audioEncoder && audioBuffer && audioFramesEncoded < audioBuffer.length) {
+                        const targetSampleRate = audioBuffer.sampleRate;
+                        const targetChannels = audioBuffer.numberOfChannels;
+                        const size = audioBuffer.length - audioFramesEncoded;
+
+                        const planarData = new Float32Array(size * targetChannels);
+                        for (let ch = 0; ch < targetChannels; ch++) {
+                            const chData = audioBuffer.getChannelData(ch);
+                            for (let i = 0; i < size; i++) {
+                                planarData[ch * size + i] = chData[audioFramesEncoded + i];
+                            }
+                        }
+
+                        const audioData = new AudioData({
+                            format: 'f32-planar',
+                            sampleRate: targetSampleRate,
+                            numberOfFrames: size,
+                            numberOfChannels: targetChannels,
+                            timestamp: Math.round((audioFramesEncoded / targetSampleRate) * 1_000_000),
+                            data: planarData
+                        });
+
+                        try {
+                            if ((audioEncoder as any).state === 'configured') audioEncoder.encode(audioData);
+                        } catch (e) { }
+                        audioData.close();
+                        audioFramesEncoded += size;
+                    }
+
+                    // 3. Flush Encoders
                     try {
                         if (videoEncoder.state === 'configured') await videoEncoder.flush();
                     } catch (e) {
