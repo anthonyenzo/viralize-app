@@ -6,7 +6,6 @@ import { useAppStore } from "../../store/useAppStore";
 import { useAuthStore } from "../../store/useAuthStore";
 
 // --- WebCodecs Type Definitions (Polyfill for TS) ---
-// These are standard in modern browsers but may be missing from current TS lib
 declare class MediaStreamTrackProcessor {
     constructor(init: { track: MediaStreamTrack });
     readable: ReadableStream;
@@ -26,7 +25,7 @@ declare class AudioEncoder {
     state: string;
 }
 declare class VideoFrame {
-    constructor(image: CanvasImageSource, init?: { timestamp: number, duration?: number });
+    constructor(image: CanvasImageSource, init?: { timestamp: number, duration?: number, alpha?: string });
     close(): void;
 }
 // ----------------------------------------------------
@@ -105,7 +104,19 @@ export function ReelsCreator() {
 
     // Prepare Badge Image (Verified Badge SVG) - Preload once
     const badgeImgRef = useRef<HTMLImageElement | null>(null);
+    const logoImgRef = useRef<HTMLImageElement | null>(null);
     const layoutCacheRef = useRef<{ text: string, width: number, lines: string[] } | null>(null);
+
+    // Update logo ref when logo state changes
+    useEffect(() => {
+        if (logo) {
+            const img = new Image();
+            img.src = logo;
+            logoImgRef.current = img;
+        } else {
+            logoImgRef.current = null;
+        }
+    }, [logo]);
 
     useEffect(() => {
         const badgeSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" fill="#1d9bf0"><g><path d="M20.396 11c-.018-.646-.215-1.275-.57-1.816-.354-.54-.852-.972-1.438-1.246.223-.607.27-1.264.14-1.897-.131-.634-.437-1.218-.882-1.687-.47-.445-1.053-.75-1.687-.882-.633-.13-1.29-.083-1.897.14-.273-.587-.704-1.086-1.245-1.44S11.647 1.62 11 1.604c-.646.017-1.273.213-1.813.568s-.969.854-1.24 1.44c-.608-.223-1.267-.272-1.902-.14-.635.13-1.22.436-1.687.882-.445.47-.749 1.055-.878 1.688-.13.633-.08 1.29.144 1.896-.587.274-1.087.705-1.443 1.245-.356.54-.555 1.17-.574 1.817.02.647.215 1.276.574 1.817.356.54.856.972 1.443 1.245-.224.606-.274 1.263-.144 1.896.13.634.433 1.218.877 1.688.47.443 1.054.747 1.687.878.633.132 1.29.084 1.897-.136.274.586.705 1.084 1.246 1.439.54.354 1.17.551 1.816.569.647-.016 1.276-.213 1.817-.567s.972-.854 1.245-1.44c.604.239 1.266.296 1.903.164.636-.132 1.22-.447 1.68-.907.46-.46.776-1.044.908-1.681s.075-1.299-.165-1.903c.586-.274 1.084-.705 1.439-1.246.354-.54.551-1.17.569-1.816zM9.662 14.85l-3.429-3.428 1.293-1.302 2.589 2.589 5.828-5.829 1.386 1.28-7.667 6.69z"></path></g></svg>`;
@@ -116,8 +127,6 @@ export function ReelsCreator() {
 
 
     // --- UNIFIED DRAWING LOGIC ---
-    // This is the core function that guarantees 100% fidelity between Preview and Export
-    // Using useCallback so we can call it from both loops
     const drawReelFrame = useCallback((
         ctx: CanvasRenderingContext2D,
         canvasWidth: number,
@@ -242,19 +251,22 @@ export function ReelsCreator() {
         const avatarSize = 80 * scaleM;
         const avatarY = contentStartY;
 
-        if (logo) {
-            const logoImg = new Image();
-            logoImg.src = logo;
+        if (logo && logoImgRef.current && logoImgRef.current.complete) {
             ctx.save();
             ctx.beginPath();
             ctx.arc(contentStartX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2, true);
             ctx.closePath();
             ctx.clip();
             try {
-                // Ensure image is loaded usually, but simplified here
-                ctx.drawImage(logoImg, contentStartX, avatarY, avatarSize, avatarSize);
+                ctx.drawImage(logoImgRef.current, contentStartX, avatarY, avatarSize, avatarSize);
             } catch (e) { }
             ctx.restore();
+        } else if (logo) {
+            // Logo is set but not loaded yet, or ref is missing - show placeholder to be safe
+            ctx.fillStyle = "#222";
+            ctx.beginPath();
+            ctx.arc(contentStartX + avatarSize / 2, avatarY + avatarSize / 2, avatarSize / 2, 0, Math.PI * 2, true);
+            ctx.fill();
         } else {
             ctx.fillStyle = "#333";
             ctx.beginPath();
@@ -312,9 +324,6 @@ export function ReelsCreator() {
         let animationFrameId: number;
 
         const loop = () => {
-            if (video.paused && !video.ended) {
-                // Even if paused, we might want to redraw if position changes
-            }
             const ctx = canvas.getContext('2d');
             if (ctx) {
                 drawReelFrame(ctx, canvas.width, canvas.height, video);
@@ -388,7 +397,7 @@ export function ReelsCreator() {
         }
     };
 
-    // Video Rendering Logic (Refactored for 30fps Synchronization & Audio Fidelity)
+    // Video Rendering Logic
     const renderVideo = async () => {
         if (!videoRef.current || !canvasRef.current || !selectedHeadline) return;
 
@@ -396,456 +405,228 @@ export function ReelsCreator() {
         setIsRendering(true);
         const video = videoRef.current;
         const canvas = canvasRef.current;
-        // Watchdog removed as requested
 
         try {
-            console.log("Render: Starting...");
-
-            // --- 0. STATUS INIT & SAFETY CHECKS ---
-            console.log("Render: Waiting for metadata...");
-            // Wait for Metadata (Duration)
+            // Wait for Metadata
             if (video.readyState < 1) {
                 await new Promise(r => {
                     video.onloadedmetadata = () => r(null);
-                    setTimeout(r, 2000); // 2s timeout
+                    setTimeout(r, 2000);
                 });
             }
 
-            console.log("Render: Metadata loaded. Duration:", video.duration);
             if (!video.duration || isNaN(video.duration)) {
-                throw new Error("Duração do vídeo inválida/zerada.");
+                throw new Error("Duração do vídeo inválida.");
             }
 
-            // Update stats with real duration immediately so user sees it
-            setRenderStats({ frame: 0, time: 0, duration: video.duration, fps: -1 });
-
-            const ctx = canvas.getContext('2d', { willReadFrequently: true }); // Optimized
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
             if (!ctx) throw new Error("Falha ao criar contexto 2D");
 
-            // Resolution Config
             const targetWidth = resolution === '1080p' ? 1080 : 720;
             const targetHeight = resolution === '1080p' ? 1920 : 1280;
-
-            console.log(`Render: Configured for ${resolution} (${targetWidth}x${targetHeight}) @ 12Mbps`);
-
             canvas.width = targetWidth;
             canvas.height = targetHeight;
 
-            // --- Audio Context Setup (Offline Processing) ---
             if (!audioContextRef.current) {
                 audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
             }
             const audioCtx = audioContextRef.current;
             if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-            console.log("Render: extracting audio track...");
             let audioBuffer: AudioBuffer | null = null;
             try {
                 if (!videoFile) throw new Error("Video File unavailable");
                 const arrayBuffer = await videoFile.arrayBuffer();
                 audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-                console.log("Render: Audio decoded", { channels: audioBuffer.numberOfChannels, rate: audioBuffer.sampleRate });
             } catch (e: any) {
                 console.error("Audio extraction failed:", e);
-                alert("Aviso: Falha ao carregar o áudio original. O vídeo ficará mudo. (" + e.message + ")");
             }
 
-
-
-            // --- Muxer & Encoder Setup ---
-            console.log("Render: Importing Muxer...");
             const { Muxer, ArrayBufferTarget } = await import('mp4-muxer');
-            console.log("Render: Muxer loaded.");
-            // Fixed Frame Rate: 60fps (CapCut Standard)
             const FPS = 60;
+            const totalFrames = Math.ceil(video.duration * FPS);
+            let finalVideoConfig: any = null;
+            let finalMuxerVideoCodec: 'avc' | 'hevc' = 'avc';
 
-            // Video Codec Resolution & Selection (H.265 / HEVC)
-            let selectedCodec = 'hev1.1.6.L120.90'; // HEVC Main Profile Level 4.0
-            let muxerVideoCodec: 'hevc' | 'avc' = 'hevc';
+            const codecOptions = [
+                { codec: 'hev1.1.6.L120.90', muxer: 'hevc', accel: 'prefer-hardware' },
+                { codec: 'avc1.64002A', muxer: 'avc', accel: 'prefer-hardware' }, // Level 4.2 for 1080p@60
+                { codec: 'avc1.64002A', muxer: 'avc', accel: 'prefer-software' },
+                { codec: 'avc1.42E01E', muxer: 'avc', accel: 'prefer-software' }
+            ];
 
-            if ('isConfigSupported' in VideoEncoder) {
+            for (const opt of codecOptions) {
                 try {
-                    const support = await (VideoEncoder as any).isConfigSupported({
-                        codec: selectedCodec,
+                    const config = {
+                        codec: opt.codec,
                         width: targetWidth,
                         height: targetHeight,
-                        bitrate: 12_000_000,
+                        bitrate: resolution === '1080p' ? 12_000_000 : 8_000_000,
                         framerate: FPS,
-                    });
-                    if (!support.supported) {
-                        console.warn("H.265 (HEVC) not supported on this browser, falling back to H.264 (AVC)");
-                        selectedCodec = 'avc1.4D4028';
-                        muxerVideoCodec = 'avc';
-                    } else {
-                        console.log("H.265 (HEVC) support confirmed!");
+                        hardwareAcceleration: opt.accel as any
+                    };
+
+                    if ('isConfigSupported' in VideoEncoder) {
+                        const support = await (VideoEncoder as any).isConfigSupported(config);
+                        if (!support.supported) continue;
                     }
+
+                    finalVideoConfig = config;
+                    finalMuxerVideoCodec = opt.muxer as any;
+                    break;
                 } catch (e) { }
             }
 
-            const muxerOptions: any = {
+            if (!finalVideoConfig) {
+                finalVideoConfig = {
+                    codec: 'avc1.42E01E',
+                    width: targetWidth,
+                    height: targetHeight,
+                    bitrate: 5_000_000,
+                    framerate: FPS
+                };
+                finalMuxerVideoCodec = 'avc';
+            }
+
+            const muxer = new Muxer({
                 target: new ArrayBufferTarget(),
                 video: {
-                    codec: muxerVideoCodec,
+                    codec: finalMuxerVideoCodec,
                     width: targetWidth,
                     height: targetHeight,
                     frameRate: FPS
                 },
-                fastStart: 'in-memory', // Critical for WhatsApp
-                firstTimestampBehavior: 'offset'
-            };
-
-            // Only configure muxer audio if we successfully decoded an audio buffer
-            if (audioBuffer) {
-                muxerOptions.audio = {
+                audio: audioBuffer ? {
                     codec: 'aac',
                     numberOfChannels: audioBuffer.numberOfChannels,
                     sampleRate: audioBuffer.sampleRate
-                };
-            }
-
-            const muxer = new Muxer(muxerOptions);
-            console.log("Render: Muxer initialized.");
-
-            let encodedFramesCount = 0;
-            const videoEncoder = new VideoEncoder({
-                output: (chunk, meta) => {
-                    try {
-                        muxer.addVideoChunk(chunk, meta);
-                        encodedFramesCount++;
-                    } catch (e: any) {
-                        console.error("Muxer error adding video chunk:", e);
-                        if (chunk.type === 'key') {
-                            isRenderingRef.current = false;
-                            setIsRendering(false);
-                            alert(`Erro fatal no codificador: ${e.message}`);
-                        }
-                    }
-                },
-                error: (e) => {
-                    const msg = e.message || String(e);
-                    console.error("VideoEncoder error:", e);
-                    alert(`Erro no codificador de vídeo: ${msg}`);
-                    isRenderingRef.current = false;
-                    setIsRendering(false);
-                }
+                } : undefined,
+                fastStart: 'in-memory',
+                firstTimestampBehavior: 'offset'
             });
 
-            const videoConfig: VideoEncoderConfig = {
-                codec: selectedCodec,
-                width: targetWidth,
-                height: targetHeight,
-                bitrate: 12_000_000, // 12 Mbps (User Requested)
-                framerate: FPS,
-                hardwareAcceleration: 'prefer-hardware',
-                latencyMode: 'realtime',
-            };
+            const videoEncoder = new VideoEncoder({
+                output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+                error: (e) => {
+                    console.error("VideoEncoder error", e);
+                    setError(`Erro no codificador de vídeo: ${e.message}`);
+                    isRenderingRef.current = false;
+                }
+            });
+            videoEncoder.configure(finalVideoConfig);
 
-            // Check support before configuring (Safe check)
-            if ('isConfigSupported' in VideoEncoder) {
-                (VideoEncoder as any).isConfigSupported(videoConfig).then((support: any) => {
-                    console.log(`Video Config Supported: ${support.supported}`, support);
-                    if (!support.supported) {
-                        alert(`Aviso: Seu navegador não suporta exportar em H.265 nativamente ou nesta resolução. Tente usar o Chrome atualizado.`);
-                    }
-                }).catch((e: any) => console.error("Check support error", e));
-            }
-
-            videoEncoder.configure(videoConfig);
-            console.log("Render: VideoEncoder configured.");
-
-            let audioEncoder: AudioEncoder | null = null;
-            let audioFramesEncoded = 0;
-
+            // --- Pre-encode Audio ---
             if (audioBuffer) {
-                audioEncoder = new AudioEncoder({
+                const audioEncoder = new AudioEncoder({
                     output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
-                    error: (e) => {
-                        const msg = e.message || String(e);
-                        if (msg.includes('Flushing error')) return;
-                        console.error("AudioEncoder error:", e);
-                    }
+                    error: (e) => console.error("AudioEncoder error", e)
                 });
-
                 audioEncoder.configure({
-                    codec: 'mp4a.40.2', // AAC LC
+                    codec: 'mp4a.40.2',
                     numberOfChannels: audioBuffer.numberOfChannels,
                     sampleRate: audioBuffer.sampleRate,
-                    bitrate: Math.max(128_000, audioBuffer.numberOfChannels * 64_000),
+                    bitrate: 128000
                 });
-                console.log("Render: AudioEncoder configured.");
-            }
 
-            // --- Prep Playback (Visual Only) ---
-            video.currentTime = 0;
-            video.loop = false;
-            video.muted = true; // Mute to allow fast playback without distorting system audio
-
-            // Timestamps are based on video time, so output speed is correct.
-            // 720p is fast enough for 1.0x (Real-time).
-            // 1080p is heavy (2.25x pixels), so we slow down to 0.75x to give the renderer time to capture every frame smoothly.
-            const playbackSpeed = resolution === '1080p' ? 0.75 : 1.0;
-            video.playbackRate = playbackSpeed;
-
-            console.log(`Render: Starting playback (Visuals) at ${playbackSpeed}x speed...`);
-            try {
-                await video.play();
-            } catch (e: any) {
-                throw new Error("Falha ao iniciar reprodução: " + e.message);
-            }
-
-            // --- Capture Loop (Visuals) ---
-
-            // --- Render Loop (With Gating) ---
-            let frameCount = 0;
-            const targetFrameInterval = 1 / FPS; // 1/60s
-            let nextFrameTime = 0;
-
-            const processFrame = async () => {
-                const isRunning = isRenderingRef.current;
-                if (!isRunning) return;
-
-                // Sync with Video Time (Critical Fix for Speed Mismatch)
-                const currentVideoTime = video.currentTime;
-
-                // Exit Condition: Check real time, not frame count
-                if (video.ended || (video.duration && currentVideoTime >= video.duration - 0.1)) {
-                    console.log("Render: Finished (Duration/Ended condition met)");
-                    await finalizeExport();
-                    return;
-                }
-
-                // FPS Gating: Ensure strict 60fps output regardless of playback speed
-                // If we are at 0.5x speed, video time advances slower than real time (rAF), so we skip frames to match 60fps target.
-                if (currentVideoTime < nextFrameTime) {
-                    if (isRenderingRef.current) requestAnimationFrame(processFrame);
-                    return; // Too early for next frame
-                }
-
-                // Advance target time for next frame
-                // We use nextFrameTime as the base to keep perfect cadence, but clamp to current time if we fell behind significantly
-                if (currentVideoTime > nextFrameTime + targetFrameInterval * 2) {
-                    nextFrameTime = currentVideoTime; // Resync if major lag
-                } else {
-                    nextFrameTime += targetFrameInterval;
-                }
-
-                const timestamp = Math.round(currentVideoTime * 1_000_000);
-                const frameDuration = Math.round(1_000_000 / FPS);
-
-                // Debug Stats (Update UI every ~0.5s)
-                if (frameCount % 30 === 0) {
-                    setRenderStats({
-                        frame: frameCount,
-                        time: currentVideoTime,
-                        duration: video.duration || 0,
-                        fps: FPS
-                    });
-                }
-
-                // Flow Control: Prevent Encoder Saturation (Video + Audio)
-                const vQueue = (videoEncoder as any).encodeQueueSize;
-                const aQueue = audioEncoder ? (audioEncoder as any).encodeQueueSize : 0;
-
-                if (vQueue > 10 || aQueue > 10) {
-                    // Only pause if actually moving
-                    if (!video.paused) video.pause();
-
-                    // Wait for queues to drain
-                    while (isRenderingRef.current && ((videoEncoder as any).encodeQueueSize > 2 || (audioEncoder ? (audioEncoder as any).encodeQueueSize : 0) > 2)) {
-                        await new Promise(r => setTimeout(r, 10));
+                const totalAudioFrames = audioBuffer.length;
+                const chunkSize = 4096;
+                for (let offset = 0; offset < totalAudioFrames; offset += chunkSize) {
+                    if (!isRenderingRef.current) break;
+                    const size = Math.min(chunkSize, totalAudioFrames - offset);
+                    const planarData = new Float32Array(size * audioBuffer.numberOfChannels);
+                    for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+                        planarData.set(audioBuffer.getChannelData(ch).subarray(offset, offset + size), ch * size);
                     }
-                    if (isRenderingRef.current && video.paused) await video.play();
-                }
-
-                try {
-                    // Draw
-                    drawReelFrame(ctx, canvas.width, canvas.height, video);
-
-                    // Optimization: Snapshot canvas directly
-                    const frame = new VideoFrame(canvas, {
-                        timestamp: timestamp,
-                        duration: frameDuration,
-                        alpha: 'discard'
+                    const audioData = new AudioData({
+                        format: 'f32-planar',
+                        sampleRate: audioBuffer.sampleRate,
+                        numberOfFrames: size,
+                        numberOfChannels: audioBuffer.numberOfChannels,
+                        timestamp: Math.round((offset / audioBuffer.sampleRate) * 1_000_000),
+                        data: planarData
                     } as any);
-
-                    if (videoEncoder.state === 'configured') {
-                        // Keyframe every 2 seconds (approx 120 frames at 60fps)
-                        videoEncoder.encode(frame, { keyFrame: frameCount % 120 === 0 });
-                    }
-
-                    frame.close();
-
-                    // --- INTERLEAVED AUDIO ENCODING (PERFECT A/V SYNC FOR MP4/SAFARI) ---
-                    if (audioEncoder && audioBuffer) {
-                        const targetSampleRate = audioBuffer.sampleRate;
-                        const targetChannels = audioBuffer.numberOfChannels;
-
-                        // We encode audio precisely up to the current video timestamp bounds
-                        const requiredAudioFrames = Math.floor(currentVideoTime * targetSampleRate);
-                        const framesToEncode = requiredAudioFrames - audioFramesEncoded;
-
-                        if (framesToEncode > 0 && audioFramesEncoded < audioBuffer.length) {
-                            const size = Math.min(framesToEncode, audioBuffer.length - audioFramesEncoded);
-
-                            // Web Audio original format: f32-planar
-                            const planarData = new Float32Array(size * targetChannels);
-                            for (let ch = 0; ch < targetChannels; ch++) {
-                                const chData = audioBuffer.getChannelData(ch);
-                                for (let i = 0; i < size; i++) {
-                                    planarData[ch * size + i] = chData[audioFramesEncoded + i];
-                                }
-                            }
-
-                            const audioData = new AudioData({
-                                format: 'f32-planar',
-                                sampleRate: targetSampleRate,
-                                numberOfFrames: size,
-                                numberOfChannels: targetChannels,
-                                timestamp: Math.round((audioFramesEncoded / targetSampleRate) * 1_000_000),
-                                data: planarData
-                            });
-
-                            if ((audioEncoder as any).state === 'configured') {
-                                audioEncoder.encode(audioData);
-                            }
-                            audioData.close();
-
-                            audioFramesEncoded += size;
-                        }
-                    }
-                    frameCount++;
-
-                    if (isRenderingRef.current) {
-                        requestAnimationFrame(processFrame);
-                    }
-                } catch (e) {
-                    console.error("Frame processing error:", e);
-                    isRenderingRef.current = false;
-                    setIsRendering(false);
-                    alert("Erro durante processamento: " + String(e));
+                    audioEncoder.encode(audioData);
+                    audioData.close();
                 }
-            };
+                await audioEncoder.flush();
+            }
 
-            const finalizeExport = async () => {
+            // --- Deterministic Render Loop ---
+            video.pause();
+            video.muted = true;
+
+            const frameDurationUs = Math.round(1_000_000 / FPS);
+
+            // Critical: Ensure the video is at state HAVE_CURRENT_DATA or higher
+            if (video.readyState < 2) {
+                await new Promise(r => {
+                    video.onloadeddata = () => r(null);
+                    setTimeout(() => r(null), 2000);
+                });
+            }
+
+            for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
+                if (!isRenderingRef.current) break;
+
+                const currentSec = frameIdx / FPS;
+                video.currentTime = currentSec;
+
+                // Wait for seek and frame availability
+                await new Promise((resolve) => {
+                    const onSeeked = () => {
+                        video.removeEventListener('seeked', onSeeked);
+                        // Small extra delay to ensure the decoder has actually pushed the frame to the surface
+                        requestAnimationFrame(() => resolve(null));
+                    };
+                    video.addEventListener('seeked', onSeeked);
+                    // Critical failsafe for seeks that don't fire or fire slowly
+                    setTimeout(() => resolve(null), 500);
+                });
+
+                if (frameIdx % 30 === 0) {
+                    setRenderStats({ frame: frameIdx, time: currentSec, duration: video.duration, fps: FPS });
+                }
+
+                drawReelFrame(ctx, canvas.width, canvas.height, video);
+                const frame = new VideoFrame(canvas, {
+                    timestamp: frameIdx * frameDurationUs,
+                    duration: frameDurationUs
+                });
+
                 try {
-                    // 1. Stop Loop
-                    isRenderingRef.current = false;
-
-                    // 2. Encode remaining audio tail
-                    if (audioEncoder && audioBuffer && audioFramesEncoded < audioBuffer.length) {
-                        const targetSampleRate = audioBuffer.sampleRate;
-                        const targetChannels = audioBuffer.numberOfChannels;
-                        const size = audioBuffer.length - audioFramesEncoded;
-
-                        const planarData = new Float32Array(size * targetChannels);
-                        for (let ch = 0; ch < targetChannels; ch++) {
-                            const chData = audioBuffer.getChannelData(ch);
-                            for (let i = 0; i < size; i++) {
-                                planarData[ch * size + i] = chData[audioFramesEncoded + i];
-                            }
-                        }
-
-                        const audioData = new AudioData({
-                            format: 'f32-planar',
-                            sampleRate: targetSampleRate,
-                            numberOfFrames: size,
-                            numberOfChannels: targetChannels,
-                            timestamp: Math.round((audioFramesEncoded / targetSampleRate) * 1_000_000),
-                            data: planarData
-                        });
-
-                        try {
-                            if ((audioEncoder as any).state === 'configured') audioEncoder.encode(audioData);
-                        } catch (e) { }
-                        audioData.close();
-                        audioFramesEncoded += size;
-                    }
-
-                    // 3. Flush Encoders
-                    try {
-                        if (videoEncoder.state === 'configured') await videoEncoder.flush();
-                    } catch (e) {
-                        console.error("Video flush error:", e);
-                        throw e; // Video is critical
-                    }
-
-                    try {
-                        if (audioEncoder && (audioEncoder as any).state === 'configured') await audioEncoder.flush();
-                    } catch (e) {
-                        console.warn("Audio flush error (ignoring):", e);
-                        // Non-fatal, proceed to save video (silent)
-                    }
-
-                    // 3. Finalize Container
-                    if (encodedFramesCount === 0) {
-                        throw new Error("Nenhum frame processado. Tente recarregar a página.");
-                    }
-
-                    try {
-                        muxer.finalize();
-                    } catch (e: any) {
-                        // Specific handler for colorSpace crash
-                        if (e.message?.includes('colorSpace')) {
-                            throw new Error("Erro de metadados do vídeo. Tente um vídeo diferente ou outro navegador.");
-                        }
-                        throw e;
-                    }
-
-                    const buffer = (muxer.target as any).buffer;
-                    const blob = new Blob([buffer], { type: 'video/mp4' });
-                    setExportedBlob(blob); // Save to state for manual download trigger
-
-                    if (user) {
-                        incrementReels(user.id);
-                    }
-
-                } catch (err) {
-                    console.error("Export Error", err);
-                    const msg = err instanceof Error ? err.message : String(err);
-                    alert(`Erro ao finalizar vídeo: ${msg}. Tente recarregar a página.`);
-                    setIsRendering(false);
-                } finally {
-                    isRenderingRef.current = false;
-
-                    // Cleanup
-                    video.currentTime = 0;
-                    video.playbackRate = 1.0;
-                    video.loop = true;
-                    video.play();
-
-                    setIsPlaying(true);
+                    videoEncoder.encode(frame, { keyFrame: frameIdx % 60 === 0 });
+                } catch (e) {
+                    console.error("Encoder encode error:", e);
                 }
-            };
+                frame.close();
+            }
 
-            // --- START LOOP ROBUSTLY ---
-            // We use a failsafe to ensure the loop kicks off even if requestVideoFrameCallback hangs
-
-            let loopActive = false;
-            const startLoop = () => {
-                if (loopActive) return;
-                loopActive = true;
-                console.log("DEBUG: Starting render loop (Forced rAF for 60fps)...");
-                requestAnimationFrame(processFrame);
-            };
-
-            startLoop();
-
-            // WATCHDOG: If frame 0 hasn't processed in 1.5s, force fallback to rAF
-            setTimeout(() => {
-                if (isRendering && frameCount === 0) {
-                    console.warn("⚠️ Watchdog: Loop stalled at 0. Forcing requestAnimationFrame...");
-                    console.log("DEBUG: Watchdog triggered. Current frame count:", frameCount);
-                    requestAnimationFrame(processFrame);
-                    // Also kick video play again just in case
-                    video.play().catch(console.error);
+            if (isRenderingRef.current) {
+                try {
+                    await videoEncoder.flush();
+                    muxer.finalize();
+                    const bin = muxer.target.buffer;
+                    const blob = new Blob([bin], { type: 'video/mp4' });
+                    setExportedBlob(blob);
+                    if (user) incrementReels(user.id);
+                } catch (e) {
+                    console.error("Finalization error:", e);
+                    setError("Erro ao finalizar vídeo.");
                 }
-            }, 1500);
+            }
+
+            isRenderingRef.current = false;
+            setIsRendering(false);
+            video.muted = false;
+            video.pause();
+            video.currentTime = 0;
+            video.play().catch(() => { });
 
         } catch (err: any) {
             console.error("Render Fatal Error:", err);
             isRenderingRef.current = false;
             setIsRendering(false);
-            alert("Erro ao iniciar renderização: " + (err instanceof Error ? err.message : String(err)));
+            setError("Erro ao iniciar renderização: " + (err instanceof Error ? err.message : String(err)));
         }
     };
 
@@ -1085,7 +866,7 @@ export function ReelsCreator() {
                     <video
                         ref={videoRef}
                         src={videoUrl || undefined}
-                        className="hidden"
+                        className="fixed top-0 left-0 opacity-0 pointer-events-none w-[1px] h-[1px]"
                         playsInline
                         loop
                         muted={false} // Ensure audio is allowed
@@ -1160,7 +941,7 @@ export function ReelsCreator() {
                                 />
 
                                 {/* Controls Overlay */}
-                                <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity z-20">
+                                <div className="absolute bottom-4 left-0 right-0 flex justify-center gap-4 z-20">
                                     <button
                                         onClick={(e) => {
                                             e.stopPropagation();
@@ -1172,9 +953,9 @@ export function ReelsCreator() {
                                                 setIsPlaying(false);
                                             }
                                         }}
-                                        className="bg-white/20 hover:bg-white/30 backdrop-blur-md p-3 rounded-full text-white"
+                                        className="bg-white/20 hover:bg-white/30 backdrop-blur-md p-4 rounded-full text-white shadow-xl active:scale-95 transition-all"
                                     >
-                                        {isPlaying ? <Pause className="w-6 h-6" /> : <Play className="w-6 h-6" />}
+                                        {isPlaying ? <Pause className="w-8 h-8" fill="white" /> : <Play className="w-8 h-8 ml-1" fill="white" />}
                                     </button>
                                 </div>
 
